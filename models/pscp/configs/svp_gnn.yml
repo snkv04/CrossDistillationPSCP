@@ -1,0 +1,33 @@
+model:
+  perceptron_mode: svp
+  convolution_mode: gnn
+  num_layers: 3
+  drop_rate: 0.1
+  node_hid_dims: 
+    - 128
+    - 32
+  edge_hid_dims:
+    - 64
+    - 16
+  top_k: 30
+
+train:
+  seed: 1048596
+  max_epochs: 400
+  val_freq: 1
+  max_grad_norm: 1.0
+  optimizer:
+    type: adam
+    lr: 1.e-3
+    weight_decay: 0.0
+    beta1: 0.9
+    beta2: 0.999
+  scheduler: 
+    type: exp
+    gamma: 0.99
+
+data:
+  train_val_dir: /home/common/proj/side_chain_packing/data/bc40_plus_afdb
+  train_batch_size: 16
+  val_batch_size: 16
+  test_batch_size: 1
