@@ -1,0 +1,8 @@
+__pycache__/
+chi_histograms/
+figures_for_paper/
+inference_outputs/
+logs/
+nohup_logs/
+plddt_plots/
+tables_for_paper/
