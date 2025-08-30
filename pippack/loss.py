@@ -9,7 +9,7 @@ import math
 
 import torch.nn.functional as F
 
-import pippack_residue_constants as rc
+import pippack.residue_constants as rc
 from oagnn_utils.misc import Counter
 
 

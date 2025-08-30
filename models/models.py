@@ -46,7 +46,7 @@ from utils.constants import atom14_mask as atom_mask_true
 from utils.structure_utils import create_structure_from_crds
 
 # PIPPack imports
-from pippack_loss import rotamer_recovery_from_coords, nll_chi_loss, offset_mse, supervised_chi_loss, \
+from pippack.loss import rotamer_recovery_from_coords, nll_chi_loss, offset_mse, supervised_chi_loss, \
     BlackHole, sc_rmsd, local_interresidue_sc_clash_loss, unclosed_proline_loss, MetricLogger
 
 
