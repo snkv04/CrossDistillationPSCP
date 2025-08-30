@@ -24,7 +24,7 @@ from modules.geometric import construct_3d_basis
 from modules.norm import SVLayerNorm
 from modules.perceptron import VectorPerceptron
 from models.datasets import _process_single_entry, _remove_unknown_flowpacker_residues, \
-    _orientations, _impute_sidechain_vectors
+    _orientations, _impute_cb_vectors
 from utils.misc import BlackHole
 from models.loss_fns import trig_loss, huber_loss
 from modules.dropout import SVDropout
@@ -474,7 +474,7 @@ class PSCPAllChisNetwork(nn.Module):
                 resseq=batch.resseq[i],
                 mask_out_noncontiguous_residues=self.mask_front_and_back_vec,
                 device=device)
-            imputed_sidechain_vectors = _impute_sidechain_vectors(
+            imputed_sidechain_vectors = _impute_cb_vectors(
                 pos_N=batch.pos_N[protein_start:protein_end],
                 pos_CA=batch.pos_CA[protein_start:protein_end],
                 pos_C=batch.pos_C[protein_start:protein_end],)
