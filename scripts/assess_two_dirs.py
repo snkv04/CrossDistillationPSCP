@@ -1,22 +1,21 @@
-from attnpacker.protein_learning.assessment.sidechain import assess_sidechains, summarize, debug
-import pprint
+from attnpacker.protein_learning.assessment.sidechain import assess_sidechains, summarize
 import os
 import json
 import torch
 from tqdm import tqdm
 import glob
 import argparse
-import multiprocessing
 from functools import partial
 from joblib import Parallel, delayed
 
+
 def results_for_single_target(
-        pdb_file_name,
-        targets_dir,
-        predictions_dir,
-        write_per_res_per_target_stats=False,
-        write_per_target_stats=False,
-        per_target_metrics_dir=None
+    pdb_file_name,
+    targets_dir,
+    predictions_dir,
+    write_per_res_per_target_stats=False,
+    write_per_target_stats=False,
+    per_target_metrics_dir=None
 ):
     predicted_pdb = os.path.join(predictions_dir, pdb_file_name)
     target_pdb = os.path.join(targets_dir, pdb_file_name)
@@ -47,10 +46,8 @@ def results_for_single_target(
         with open(per_target_stats_file_name, "w") as file:
             json.dump(tensor_to_python(target_level_stats), file, indent=2)
 
-    # if "T119" in pdb_file_name:
-    #     debug(res_level_stats, "res_level_stats", False)
-
     return target_level_stats
+
 
 def results_per_each_target(targets_dir, predictions_dir, per_target_metrics_dir=None):
     target_files = glob.glob(os.path.join(targets_dir, "*.pdb"))
@@ -73,6 +70,7 @@ def results_per_each_target(targets_dir, predictions_dir, per_target_metrics_dir
     )
         
     return target_stats_list
+
 
 def aggregate_dataset_stats(target_stats_list):
     overall_stats = {}
@@ -117,8 +115,8 @@ def aggregate_dataset_stats(target_stats_list):
     }
     overall_stats["all"]["num_targets"] = len(target_stats_list)
     
-    # print(f'overall_stats = {pprint.pformat(overall_stats)}')
     return overall_stats
+
 
 def tensor_to_python(obj):
     if isinstance(obj, torch.Tensor):
@@ -128,10 +126,9 @@ def tensor_to_python(obj):
     
     return obj
 
-def run_assess_dir(targets_dir, predictions_dir):
-    stats_dir = predictions_dir
-    stats_file_name = "stats.json"
 
+def run_assess_dir(targets_dir, predictions_dir):
+    # Computes metrics
     per_target = results_per_each_target(
         targets_dir=targets_dir,
         predictions_dir=predictions_dir,
@@ -139,33 +136,28 @@ def run_assess_dir(targets_dir, predictions_dir):
     )
     across_all_targets = aggregate_dataset_stats(target_stats_list=per_target)
 
+    # Saves results
     converted = tensor_to_python(across_all_targets)
+    stats_dir = predictions_dir
     os.makedirs(stats_dir, exist_ok=True)
-    stats_file_name = os.path.join(stats_dir, stats_file_name)
+    stats_file_name = os.path.join(stats_dir, "stats.json")
     with open(stats_file_name, "w") as file:
         json.dump(converted, file, indent=4)
     print(f"Saved to {stats_file_name} ")
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--target_dir', type=str, default=None)
-    parser.add_argument('--pred_dir', type=str, default=None)
+    parser.add_argument(
+        '--target_dir',
+        type=str,
+        default='/home/common/proj/side_chain_packing/data/FINAL/structures/casp16/casp16_native'
+    )
+    parser.add_argument(
+        '--pred_dir',
+        type=str,
+        default='/home/common/proj/side_chain_packing/code/CrossDistillationPSCP/inference_outputs/casp16_native/20250830_022819_3pt_rosetta_min'
+    )
     args = parser.parse_args()
 
-    targets_dir = args.target_dir if args.target_dir is not None \
-        else f'/home/common/proj/side_chain_packing/data/bc40_dataset/by_chains' 
-    predictions_dir = args.pred_dir if args.pred_dir is not None \
-        else f'/home/common/proj/side_chain_packing/code/OAGNN/inference_outputs/bc40_dataset_train/20250426_195939_200pt'
-    run_assess_dir(targets_dir, predictions_dir)
-
-    # for targets_dir, predictions_dir in (
-    #     ('/home/common/proj/side_chain_packing/data/FINAL/casp15/casp15_native','/home/common/proj/side_chain_packing/code/OAGNN/inference_outputs/casp15_native/20250429_234711_chi1_novec_24pt'),
-    #     ('/home/common/proj/side_chain_packing/data/FINAL/casp15/casp15_native','/home/common/proj/side_chain_packing/code/OAGNN/inference_outputs/casp15_af2/20250429_234711_chi1_novec_24pt'),
-    #     ('/home/common/proj/side_chain_packing/data/FINAL/casp15/casp15_native','/home/common/proj/side_chain_packing/code/OAGNN/inference_outputs/casp15_af3/20250429_234711_chi1_novec_24pt'),
-    #     ('/home/common/proj/side_chain_packing/data/FINAL/casp15/casp15_native','/home/common/proj/side_chain_packing/code/OAGNN/inference_outputs/casp15_native/20250429_235249_chi1_27pt'),
-    #     ('/home/common/proj/side_chain_packing/data/FINAL/casp15/casp15_native','/home/common/proj/side_chain_packing/code/OAGNN/inference_outputs/casp15_af2/20250429_235249_chi1_27pt'),
-    #     ('/home/common/proj/side_chain_packing/data/FINAL/casp15/casp15_native','/home/common/proj/side_chain_packing/code/OAGNN/inference_outputs/casp15_af3/20250429_235249_chi1_27pt'),
-    # ):
-    #     run_assess_dir(targets_dir, predictions_dir)
-
-    pass
+    run_assess_dir(args.target_dir, args.pred_dir)
