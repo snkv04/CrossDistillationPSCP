@@ -30,14 +30,14 @@ from models.loss_fns import trig_loss, huber_loss
 from modules.dropout import SVDropout
 
 # AttnPacker imports
-from protein_learning.models.model_abc import train
-from protein_learning.features.input_embedding import InputEmbedding
-from protein_learning.models.utils.dataset_augment_fns import impute_cb
-from protein_learning.models.fbb_design.train import _augment
-from protein_learning.models.inference_utils import set_canonical_coords_n_masks
-from protein_learning.common.data.data_types.model_input import ModelInput
-from protein_learning.features.input_features import PI
-from protein_learning.assessment.sidechain import debug
+from attnpacker.protein_learning.models.model_abc import train
+from attnpacker.protein_learning.features.input_embedding import InputEmbedding
+from attnpacker.protein_learning.models.utils.dataset_augment_fns import impute_cb
+from attnpacker.protein_learning.models.fbb_design.train import _augment
+from attnpacker.protein_learning.models.inference_utils import set_canonical_coords_n_masks
+from attnpacker.protein_learning.common.data.data_types.model_input import ModelInput
+from attnpacker.protein_learning.features.input_features import PI
+from attnpacker.protein_learning.assessment.sidechain import debug
 
 # FlowPacker imports
 from flowpacker.utils.sidechain_utils import Idealizer

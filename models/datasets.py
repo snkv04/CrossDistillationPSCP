@@ -23,19 +23,19 @@ from Bio.PDB.Polypeptide import one_to_index, three_to_one, one_to_three
 from Bio.PDB import PDBParser
 import pydssp
 
-from protein_learning.common.data.data_types.protein import Protein
-from protein_learning.protein_utils.sidechains.sidechain_utils import get_sc_dihedral
-from protein_learning.protein_utils.sidechains.sidechain_rigid_utils import atom37_to_torsion_angles
-from protein_learning.common.data.data_types.model_input import ModelInput
-from protein_learning.features.feature_config import InputFeatureConfig
-from protein_learning.features.default_feature_generator import DefaultFeatureGenerator
-from protein_learning.features.input_embedding import InputEmbedding
-from protein_learning.models.model_abc import train
-from protein_learning.models.fbb_design.train import Train as SCPTrain, _augment
-from protein_learning.models.utils.dataset_augment_fns import impute_cb
-from protein_learning.models.inference_utils import set_canonical_coords_n_masks
-from protein_learning.common.helpers import safe_normalize
-from protein_learning.assessment.sidechain import debug
+from attnpacker.protein_learning.common.data.data_types.protein import Protein
+from attnpacker.protein_learning.protein_utils.sidechains.sidechain_utils import get_sc_dihedral
+from attnpacker.protein_learning.protein_utils.sidechains.sidechain_rigid_utils import atom37_to_torsion_angles
+from attnpacker.protein_learning.common.data.data_types.model_input import ModelInput
+from attnpacker.protein_learning.features.feature_config import InputFeatureConfig
+from attnpacker.protein_learning.features.default_feature_generator import DefaultFeatureGenerator
+from attnpacker.protein_learning.features.input_embedding import InputEmbedding
+from attnpacker.protein_learning.models.model_abc import train
+from attnpacker.protein_learning.models.fbb_design.train import Train as SCPTrain, _augment
+from attnpacker.protein_learning.models.utils.dataset_augment_fns import impute_cb
+from attnpacker.protein_learning.models.inference_utils import set_canonical_coords_n_masks
+from attnpacker.protein_learning.common.helpers import safe_normalize
+from attnpacker.protein_learning.assessment.sidechain import debug
 from flowpacker.dataset_cluster import get_features
 import openfold.np.residue_constants as rc
 

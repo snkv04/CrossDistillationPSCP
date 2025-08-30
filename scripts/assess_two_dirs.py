@@ -1,4 +1,4 @@
-from protein_learning.assessment.sidechain import assess_sidechains, summarize, debug
+from attnpacker.protein_learning.assessment.sidechain import assess_sidechains, summarize, debug
 import pprint
 import os
 import json

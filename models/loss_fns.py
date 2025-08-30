@@ -1,7 +1,7 @@
 import torch
 from torch.nn import functional as F
 
-from protein_learning.common.helpers import safe_normalize
+from attnpacker.protein_learning.common.helpers import safe_normalize
 
 def trig_loss(output, target, target_mask, chi_num_mask):
     sum_sq_diffs = ((output - target) ** 2).sum(dim=-1)

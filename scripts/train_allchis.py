@@ -62,8 +62,8 @@ from oagnn_utils.misc import BlackHole, get_logger, get_new_log_dir, load_config
 from oagnn_utils.train import get_optimizer, get_scheduler, log_losses
 from models.datasets import PSCPDataset, CombinedDataset
 from models.models import PSCPAllChisNetwork
-from protein_learning.protein_utils.sidechains.sidechain_rigid_utils import atom37_to_torsion_angles
-from protein_learning.common.helpers import safe_normalize
+from attnpacker.protein_learning.protein_utils.sidechains.sidechain_rigid_utils import atom37_to_torsion_angles
+from attnpacker.protein_learning.common.helpers import safe_normalize
 from models.loss_fns import trig_loss, huber_loss
 
 
