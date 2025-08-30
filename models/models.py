@@ -23,10 +23,10 @@ from modules.gconv import SVGraphConvLayer
 from modules.geometric import construct_3d_basis
 from modules.norm import SVLayerNorm
 from modules.perceptron import VectorPerceptron
-from models.pscp.datasets import _process_single_entry, _remove_unknown_flowpacker_residues, \
+from models.datasets import _process_single_entry, _remove_unknown_flowpacker_residues, \
     _orientations, _impute_sidechain_vectors
 from oagnn_utils.misc import BlackHole
-from models.pscp.loss_fns import trig_loss, huber_loss
+from models.loss_fns import trig_loss, huber_loss
 from modules.dropout import SVDropout
 
 # AttnPacker imports
@@ -399,7 +399,7 @@ class PSCPAllChisNetwork(nn.Module):
         return metrics
 
     def _get_arg_groups(self):
-        arg_groups_path = './models/pscp/configs/arg_groups.yaml'
+        arg_groups_path = './models/configs/arg_groups.yaml'
         with open(arg_groups_path, "r") as f:
             arg_groups_dict = yaml.safe_load(f)
         arg_groups = {k: SimpleNamespace(**v) for k, v in arg_groups_dict.items()}

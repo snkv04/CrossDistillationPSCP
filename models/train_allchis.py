@@ -1,15 +1,15 @@
 '''
 # FOR TESTING MEMORIZATION
 export CUDA_VISIBLE_DEVICES=1; nohup \
-    python -m models.pscp.train_allchis --tag testing_memorization \
+    python -m models.train_allchis --tag testing_memorization \
     --testing_memorization \
     &> nohup_logs/testing_memorization.log &
 
 # FOR NORMAL TRAINING
 export CUDA_VISIBLE_DEVICES=0,1,2,3; nohup \
     python -m torch.distributed.run --nproc_per_node=4 --master_port=29584 \
-    -m models.pscp.train_allchis --ddp --tag crossdist_finetuningcoords \
-    --resume_from /home/common/proj/side_chain_packing/code/OAGNN/logs/pscp/crossdist_modifications_sharpsigmoid/checkpoints/144.pt \
+    -m models.train_allchis --ddp --tag crossdist_finetuningcoords \
+    --resume_from /home/common/proj/side_chain_packing/code/OAGNN/logs/crossdist_modifications_sharpsigmoid/checkpoints/144.pt \
     > nohup_logs/crossdist_finetuningcoords.log 2>&1 &
 '''
 
@@ -19,9 +19,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     '--config',
     type=str,
-    default='/home/common/proj/side_chain_packing/code/CrossDistillationPSCP/models/pscp/configs/svp_gnn.yml'
+    default='/home/common/proj/side_chain_packing/code/CrossDistillationPSCP/models/configs/svp_gnn.yml'
 )
-parser.add_argument('--logdir', type=str, default='./logs/pscp')
+parser.add_argument('--logdir', type=str, default='./logs')
 parser.add_argument('--run_name', type=str, default='')
 parser.add_argument('--tag', type=str, default='')
 parser.add_argument('--debug', action='store_true', default=False)
@@ -60,11 +60,11 @@ import matplotlib.pyplot as plt
 # These are imports from this repo
 from oagnn_utils.misc import BlackHole, get_logger, get_new_log_dir, load_config, seed_all, Counter
 from oagnn_utils.train import get_optimizer, get_scheduler, log_losses
-from models.pscp.datasets import PSCPDataset, CombinedDataset
-from models.pscp.models import PSCPAllChisNetwork
+from models.datasets import PSCPDataset, CombinedDataset
+from models.models import PSCPAllChisNetwork
 from protein_learning.protein_utils.sidechains.sidechain_rigid_utils import atom37_to_torsion_angles
 from protein_learning.common.helpers import safe_normalize
-from models.pscp.loss_fns import trig_loss, huber_loss
+from models.loss_fns import trig_loss, huber_loss
 
 
 def check_cuda_memory():

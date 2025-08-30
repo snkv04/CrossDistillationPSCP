@@ -1,5 +1,5 @@
 """
-python -m models.pscp.inference_allchis \
+python -m models.inference_allchis \
     --checkpoint_dir 20250829_221150_asdf \
     --checkpoint best_val
 """
@@ -13,14 +13,14 @@ import sys
 from tqdm import tqdm
 from torch_geometric.data import DataLoader
 
-from models.pscp.datasets import PSCPDataset
-from models.pscp.models import PSCPAllChisNetwork
+from models.datasets import PSCPDataset
+from models.models import PSCPAllChisNetwork
 from oagnn_utils.misc import load_config, seed_all
 from oagnn_utils.train import get_optimizer, get_scheduler
 
 # Parses args
 parser = argparse.ArgumentParser()
-parser.add_argument('--config', default='./models/pscp/configs/svp_gnn.yml')
+parser.add_argument('--config', default='./models/configs/svp_gnn.yml')
 parser.add_argument('--checkpoint_dir', default='svp_gnn_2025_04_14__03_16_36')
 parser.add_argument('--checkpoint', type=str, default=None)
 parser.add_argument('--debug', action='store_true', default=False)
@@ -36,7 +36,7 @@ seed_all(config.train.seed)
 
 # Loads states from checkpoint
 def get_pt(checkpoint_dir, which_ckpt='best_val'):
-    folder_path = f'./logs/pscp/{checkpoint_dir}/checkpoints'
+    folder_path = f'./logs/{checkpoint_dir}/checkpoints'
     assert os.path.isdir(folder_path), f'Invalid checkpoint directory: {folder_path}'
 
     path = os.path.join(folder_path, which_ckpt)
