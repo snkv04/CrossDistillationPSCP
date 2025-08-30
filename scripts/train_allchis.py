@@ -1,49 +1,15 @@
 '''
-# FOR TESTING MEMORIZATION
-export CUDA_VISIBLE_DEVICES=1; nohup \
-    python -m models.train_allchis --tag testing_memorization \
-    --testing_memorization \
-    &> nohup_logs/testing_memorization.log &
-
-# FOR NORMAL TRAINING
-export CUDA_VISIBLE_DEVICES=0,1,2,3; nohup \
-    python -m torch.distributed.run --nproc_per_node=4 --master_port=29584 \
-    -m models.train_allchis --ddp --tag crossdist_finetuningcoords \
-    --resume_from /home/common/proj/side_chain_packing/code/OAGNN/logs/crossdist_modifications_sharpsigmoid/checkpoints/144.pt \
-    > nohup_logs/crossdist_finetuningcoords.log 2>&1 &
+export CUDA_VISIBLE_DEVICES=0,1,2,3; \
+    python -m torch.distributed.run --nproc_per_node=4 --master_port=29500 \
+    -m scripts.train_allchis --ddp
 '''
 
-# Deals with command-line arguments
-import argparse
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    '--config',
-    type=str,
-    default='/home/common/proj/side_chain_packing/code/CrossDistillationPSCP/models/configs/svp_gnn.yml'
-)
-parser.add_argument('--logdir', type=str, default='./logs')
-parser.add_argument('--run_name', type=str, default='')
-parser.add_argument('--tag', type=str, default='')
-parser.add_argument('--debug', action='store_true', default=False)
-parser.add_argument('--device', type=str, default='cuda')
-parser.add_argument('--resume_from', type=str, default=None)
-parser.add_argument('--overwrite', action='store_true', default=False)
-parser.add_argument('--testing_memorization', action='store_true', default=False)
-parser.add_argument('--no_vec', action='store_true', default=False, help='If set, disables vector features')
-# parser.add_argument('--cuda_visible_devices', type=str, default='0')
-parser.add_argument('--ddp', action='store_true', help='Enable distributed training')
-# parser.add_argument('--local_rank', type=str, default='0') # Only for torch.distributed.launch
-args = parser.parse_args()
-
-# Python-native imports
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
-print(f'CUDA_VISIBLE_DEVICES = {os.environ["CUDA_VISIBLE_DEVICES"]}')
 import shutil
 from easydict import EasyDict
 import traceback
+import argparse
 
-# Third-party library imports
 import numpy as np
 import pandas as pd
 import torch
@@ -57,7 +23,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm.auto import tqdm
 import matplotlib.pyplot as plt
 
-# These are imports from this repo
 from utils.misc import BlackHole, get_logger, get_new_log_dir, load_config, seed_all, Counter
 from utils.train import get_optimizer, get_scheduler, log_losses
 from models.datasets import PSCPDataset
@@ -67,22 +32,14 @@ from attnpacker.protein_learning.common.helpers import safe_normalize
 from models.loss_fns import trig_loss, huber_loss
 
 
-def check_cuda_memory():
-    torch.cuda.empty_cache()
-    print(f'torch.cuda.memory_allocated() = {torch.cuda.memory_allocated()}')
-    print(f'torch.cuda.memory_reserved() = {torch.cuda.memory_reserved()}')
-
-
 def setup_ddp(args):
     if args.ddp:
         dist.init_process_group(backend="nccl")
         local_rank = int(os.environ["LOCAL_RANK"]) # Env var is set by torchrun
         # local_rank = int(args.local_rank) # For use with torch.distributed.launch
         torch.cuda.set_device(local_rank)
-        print(f'Did set_device() with local rank = {local_rank}')
         args.rank = dist.get_rank()
         args.world_size = dist.get_world_size()
-        print(f'rank = {args.rank}, local rank = {local_rank}, world size = {args.world_size}')
         args.device = f"cuda:{local_rank}"
         args.is_main_process = args.rank == 0
         args.local_rank = local_rank
@@ -99,33 +56,7 @@ def cleanup_ddp(args):
         dist.destroy_process_group()
 
 
-# Load configs
-args = setup_ddp(args)
-config, config_name = load_config(args.config)
-seed_all(config.train.seed)
-
-
-# Logging
-if args.debug:
-    logger = get_logger(config_name, None)
-    writer = BlackHole()
-else:
-    if args.resume_from is not None and args.overwrite:
-        log_dir = os.path.dirname(os.path.dirname(args.resume_from))
-    else:
-        log_dir = get_new_log_dir(args.logdir, tag=args.tag, name=args.run_name)
-        shutil.copytree('./models', os.path.join(log_dir, 'models'), dirs_exist_ok=True)
-        shutil.copytree('./modules', os.path.join(log_dir, 'modules'), dirs_exist_ok=True)
-    shutil.copyfile(args.config, os.path.join(log_dir, os.path.basename(args.config)))
-    ckpt_dir = os.path.join(log_dir, 'checkpoints')
-    os.makedirs(ckpt_dir, exist_ok=True)
-    logger = get_logger('train', log_dir)
-    writer = torch.utils.tensorboard.SummaryWriter(log_dir)
-    logger.info(f'args = {args}')
-    logger.info(f'config = {config}')
-
-
-def get_data_loaders(args):
+def get_data_loaders(args, config, logger):
     if args.is_main_process:
         logger.info('Loading datasets...')
 
@@ -158,7 +89,7 @@ def get_data_loaders(args):
     return train_loader, val_loader
 
 
-def get_model(args):
+def get_model(args, config, logger):
     if args.is_main_process:
         logger.info('Building model...')
     print(f"[Rank {args.rank}] Creating PSCPAllChisNetwork...")
@@ -177,11 +108,7 @@ def get_model(args):
     print(f"[Rank {args.rank}] Model created, moving to device {args.device}...")
     model = model.to(args.device)
     print(f"[Rank {args.rank}] Model moved to device successfully")
-    print(f'model top k = {model.top_k}')
     if args.ddp:
-        # for name, param in model.named_parameters():
-        #     print(f"[Rank {args.rank}] {name} shape: {tuple(param.shape)}")
-        print(f'about to do barrier')
         dist.barrier()
 
         # Local rank is non-null when ddp is set to true
@@ -197,7 +124,11 @@ def train(
     optimizer, 
     train_losses,
     train_batch_losses,
-    global_step
+    global_step,
+    args,
+    config,
+    logger,
+    writer
 ):
     model.train()
     loss_sum_across_batches = 0.0
@@ -212,14 +143,12 @@ def train(
             output = model(batch)   # (N, 2)
             if not args.ddp:
                 loss, loss_breakdown = model.compute_loss(
-                    output, batch, loss_weights=loss_weights, _return_breakdown=True)
+                    output, batch, loss_weights=loss_weights, _return_breakdown=True
+                )
             else:
                 loss, loss_breakdown = model.module.compute_loss(
-                    output, batch, loss_weights=loss_weights, _return_breakdown=True)
-            # print(f'loss weight s= {loss_weights}')
-            # print(f'loss = {loss}')
-            # print(f'loss.requires_grad = {loss.requires_grad}')
-            # print(f'type(loss) = {type(loss)}')
+                    output, batch, loss_weights=loss_weights, _return_breakdown=True
+                )
             loss.backward()
             orig_grad_norm = clip_grad_norm_(model.parameters(), config.train.max_grad_norm)
             optimizer.step()
@@ -248,8 +177,6 @@ def train(
             traceback.print_exc()
             raise
     
-    # to_tensor = lambda x : torch.tensor(x, dtype=torch.float64)
-    # losses, sum_residues = map(to_tensor, (losses, sum_residues))
     epoch_loss_tensor = torch.tensor([loss_sum_across_batches, len(train_loader)], device=args.device)
     if args.ddp:
         dist.all_reduce(epoch_loss_tensor, op=dist.ReduceOp.SUM)
@@ -265,7 +192,10 @@ def validate(
     val_loader,
     optimizer,
     val_losses,
-    global_step
+    global_step,
+    args,
+    logger,
+    writer
 ):
     model.eval()
     loss_sum_across_batches = 0.0
@@ -281,10 +211,12 @@ def validate(
                 output = model(batch)
                 if args.ddp:
                     loss, loss_breakdown = model.module.compute_loss(
-                        output, batch, loss_weights=loss_weights, _return_breakdown=True)
+                        output, batch, loss_weights=loss_weights, _return_breakdown=True
+                    )
                 else:
                     loss, loss_breakdown = model.compute_loss(
-                        output, batch, loss_weights=loss_weights, _return_breakdown=True)
+                        output, batch, loss_weights=loss_weights, _return_breakdown=True
+                    )
 
                 # Only counts residues with at least chi1
                 num_residues = batch.chi_mask.float()[:, 0].sum().item()
@@ -310,19 +242,31 @@ def validate(
         return avg_val_loss
 
 
-def save_plots(iter, train_losses, val_losses, train_batch_losses, train_batches, ckpt_dir):
+def save_plots(iter, train_losses, val_losses, train_batch_losses, train_batches, ckpt_dir, args):
     if args.testing_memorization:
         val_losses = train_losses
 
     # First plot
     train_loss_x, train_loss_y = zip(*train_losses)
-    plt.scatter(train_loss_x, train_loss_y, marker='.', linestyle='-', color='r',
-                zorder=2, label='Training loss')
+    plt.scatter(
+        train_loss_x,
+        train_loss_y,
+        marker='.',
+        linestyle='-',
+        color='r',
+        zorder=2,
+        label='Training loss'
+    )
     val_loss_x, val_loss_y = zip(*val_losses)
-    # print(f'val loss x = {val_loss_x}')
-    # print(f'val loss y = {val_loss_y}')
-    plt.scatter(val_loss_x, val_loss_y, marker='.', linestyle='-', color='g',
-                zorder=1, label='Validation loss')
+    plt.scatter(
+        val_loss_x,
+        val_loss_y,
+        marker='.',
+        linestyle='-',
+        color='g',
+        zorder=1,
+        label='Validation loss'
+    )
 
     plt.xlabel('Epoch number')
     plt.ylabel('Per-residue loss across dataset')
@@ -334,14 +278,35 @@ def save_plots(iter, train_losses, val_losses, train_batch_losses, train_batches
 
     # Second plot
     train_batch_loss_x, train_batch_loss_y = zip(*train_batch_losses)
-    plt.scatter(train_batch_loss_x, train_batch_loss_y, marker='.', linestyle='-', color='b',
-                zorder=1, label='Training loss across batch')
+    plt.scatter(
+        train_batch_loss_x,
+        train_batch_loss_y,
+        marker='.',
+        linestyle='-',
+        color='b',
+        zorder=1,
+        label='Training loss across batch'
+    )
     train_dataset_loss_x = [train_batches * x for x in train_loss_x]
-    plt.scatter(train_dataset_loss_x, train_loss_y, marker='.', linestyle='-', color='r',
-                zorder=3, label='Training loss across dataset')
+    plt.scatter(
+        train_dataset_loss_x,
+        train_loss_y,
+        marker='.',
+        linestyle='-',
+        color='r',
+        zorder=3,
+        label='Training loss across dataset'
+    )
     val_dataset_loss_x = [train_batches * x for x in val_loss_x]
-    plt.scatter(val_dataset_loss_x, val_loss_y, marker='.', linestyle='-', color='g',
-                zorder=2, label='Validation loss across dataset')
+    plt.scatter(
+        val_dataset_loss_x,
+        val_loss_y,
+        marker='.',
+        linestyle='-',
+        color='g',
+        zorder=2,
+        label='Validation loss across dataset'
+    )
 
     plt.xlabel('Batch number')
     plt.ylabel('Per-residue loss on batch')
@@ -355,8 +320,10 @@ def save_plots(iter, train_losses, val_losses, train_batch_losses, train_batches
 def linear_anneal_clamped(epoch, start_epoch=1, end_epoch=30, start_weight=0.0002, end_weight=0.002):
     if epoch <= start_epoch:
         return start_weight
+
     elif epoch >= end_epoch:
         return end_weight
+
     else:
         slope = (end_weight - start_weight) / (end_epoch - start_epoch)
         return start_weight + slope * (epoch - start_epoch)
@@ -389,9 +356,14 @@ def training_loop(
     optimizer,
     scheduler,
     global_step,
-    train_batch_losses=[],
-    train_losses=[],
-    val_losses=[],
+    train_batch_losses,
+    train_losses,
+    val_losses,
+    args,
+    config,
+    logger,
+    writer,
+    ckpt_dir,
     patience=20,
 ):
     # Main training loop
@@ -400,6 +372,7 @@ def training_loop(
         epochs = range(it_first, config.train.max_epochs+1)
         if args.is_main_process:
             epochs = tqdm(epochs, desc="Training epochs")
+
         for it in epochs:
             if args.ddp:
                 train_loader.sampler.set_epoch(it)
@@ -408,14 +381,16 @@ def training_loop(
             loss_weights = get_loss_weights(epoch=it)
             avg_train_loss = train(
                 it, model, loss_weights, train_loader, optimizer,
-                train_losses, train_batch_losses, global_step
+                train_losses, train_batch_losses, global_step,
+                args, config, logger, writer
             )
             if it % config.train.val_freq == 0:
                 # Computes validation loss
                 if not args.testing_memorization:
                     avg_val_loss = validate(
                         it, model, loss_weights, val_loader, optimizer,
-                        val_losses, global_step
+                        val_losses, global_step,
+                        args, logger, writer
                     )
                     
                 # Finishes and logs epoch
@@ -434,7 +409,7 @@ def training_loop(
                     }, ckpt_path)
                     save_plots(
                         it, train_losses, val_losses, train_batch_losses,
-                        len(train_loader), ckpt_dir
+                        len(train_loader), ckpt_dir, args
                     )
                     
                 # Early stopping logic
@@ -448,9 +423,11 @@ def training_loop(
                             if args.is_main_process:
                                 logger.info(f"Early stopping at epoch {it} (no validation improvement for {patience} epochs).")
                             break
+
     except KeyboardInterrupt:
         if args.is_main_process:
             logger.info('Terminating...')
+
     finally:
         if args.is_main_process:
             last_graph_path = os.path.abspath(os.path.join(ckpt_dir, f'{it}_train_val_losses.png'))
@@ -459,12 +436,52 @@ def training_loop(
 
 
 def main():
-    global args
-    # args = setup_ddp(args)
+    # Deals with command-line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='/home/common/proj/side_chain_packing/code/CrossDistillationPSCP/models/configs/svp_gnn.yml'
+    )
+    parser.add_argument('--logdir', type=str, default='./logs')
+    parser.add_argument('--run_name', type=str, default='')
+    parser.add_argument('--tag', type=str, default='')
+    parser.add_argument('--debug', action='store_true', default=False)
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--resume_from', type=str, default=None)
+    parser.add_argument('--overwrite', action='store_true', default=False)
+    parser.add_argument('--testing_memorization', action='store_true', default=False)
+    parser.add_argument('--no_vec', action='store_true', default=False, help='If set, disables vector features')
+    parser.add_argument('--ddp', action='store_true', help='Enable distributed training')
+    args = parser.parse_args()
 
-    check_cuda_memory()
-    train_loader, val_loader = get_data_loaders(args)
-    model = get_model(args)
+    # Load configs
+    args = setup_ddp(args)
+    config, config_name = load_config(args.config)
+    seed_all(config.train.seed)
+
+    # Logging
+    if args.debug:
+        logger = get_logger(config_name, None)
+        writer = BlackHole()
+    else:
+        if args.resume_from is not None and args.overwrite:
+            log_dir = os.path.dirname(os.path.dirname(args.resume_from))
+        else:
+            log_dir = get_new_log_dir(args.logdir, tag=args.tag, name=args.run_name)
+            shutil.copytree('./models', os.path.join(log_dir, 'models'), dirs_exist_ok=True)
+            shutil.copytree('./modules', os.path.join(log_dir, 'modules'), dirs_exist_ok=True)
+        shutil.copyfile(args.config, os.path.join(log_dir, os.path.basename(args.config)))
+        ckpt_dir = os.path.join(log_dir, 'checkpoints')
+        os.makedirs(ckpt_dir, exist_ok=True)
+        logger = get_logger('train', log_dir)
+        writer = torch.utils.tensorboard.SummaryWriter(log_dir)
+        logger.info(f'args = {args}')
+        logger.info(f'config = {config}')
+
+    # Set up objects for training
+    train_loader, val_loader = get_data_loaders(args, config, logger)
+    model = get_model(args, config, logger)
     global_step = Counter()
     optimizer = get_optimizer(config.train.optimizer, model)
     scheduler = get_scheduler(config.train.scheduler, optimizer)
@@ -477,16 +494,12 @@ def main():
         ckpt = torch.load(args.resume_from, map_location=args.device)
         it_first = ckpt['iteration'] + 1
         model.load_state_dict(ckpt['model']) if not args.ddp else model.module.load_state_dict(ckpt['model'])
-        # logger.info('Resuming optimizer and scheduler states...')
-        # optimizer.load_state_dict(ckpt['optimizer'])
-        # scheduler.load_state_dict(ckpt['scheduler'])
-        # train_batch_losses = ckpt.get('train_batch_losses', [])
-        # train_losses = ckpt.get('train_losses', [])
-        # val_losses = ckpt.get('val_losses', [])
 
+    # Run training
     training_loop(
         it_first, model, train_loader, val_loader, optimizer, scheduler, global_step,
-        train_batch_losses, train_losses, val_losses
+        train_batch_losses, train_losses, val_losses,
+        args, config, logger, writer, ckpt_dir
     )
     cleanup_ddp(args)
 

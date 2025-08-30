@@ -27,7 +27,7 @@ train:
     gamma: 0.99
 
 data:
-  train_val_dir: /home/common/proj/side_chain_packing/data/bc40_dataset/by_chains/after_seq_sim_filtering
+  train_val_dir: /home/common/proj/side_chain_packing/data/bc40_plus_afdb
   train_batch_size: 16
   val_batch_size: 16
   test_batch_size: 1

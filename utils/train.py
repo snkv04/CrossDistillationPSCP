@@ -12,6 +12,7 @@ def get_optimizer(cfg, model):
             weight_decay=cfg.weight_decay,
             betas=(cfg.beta1, cfg.beta2, )
         )
+
     else:
         raise NotImplementedError('Optimizer not supported: %s' % cfg.type)
 
@@ -19,6 +20,7 @@ def get_optimizer(cfg, model):
 def get_scheduler(cfg, optimizer):
     if cfg.type is None:
         return BlackHole()
+
     elif cfg.type == 'plateau':
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -26,17 +28,20 @@ def get_scheduler(cfg, optimizer):
             patience=cfg.patience,
             min_lr=cfg.min_lr,
         )
+
     elif cfg.type == 'multistep':
         return torch.optim.lr_scheduler.MultiStepLR(
             optimizer,
             milestones=cfg.milestones,
             gamma=cfg.gamma,
         )
+
     elif cfg.type == 'exp':
         return torch.optim.lr_scheduler.ExponentialLR(
             optimizer,
             gamma=cfg.gamma,
         )
+
     else:
         raise NotImplementedError('Scheduler not supported: %s' % cfg.type)
 

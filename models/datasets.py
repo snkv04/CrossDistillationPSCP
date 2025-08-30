@@ -225,6 +225,10 @@ class PSCPDataset(Dataset):
             'processed_pscp.pt' if not subset else f'processed_pscp_{subset}.pt'
         )
 
+        if subset:
+            assert os.path.isfile(self.cache_path), \
+                "Train or validation subsets must be created through splitting before loading them directly"
+
         # Loads PDBs
         self.dataset = None
         start_time = time.time()
