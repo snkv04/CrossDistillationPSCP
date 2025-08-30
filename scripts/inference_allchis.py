@@ -1,6 +1,6 @@
 """
-python -m models.inference_allchis \
-    --checkpoint_dir 20250829_221150_asdf \
+python -m scripts.inference_allchis \
+    --checkpoint_dir 20250830_022819 \
     --checkpoint best_val
 """
 
@@ -18,7 +18,6 @@ from models.models import PSCPAllChisNetwork
 from utils.misc import load_config, seed_all
 from utils.train import get_optimizer, get_scheduler
 
-# Parses args
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', default='./models/configs/svp_gnn.yml')
 parser.add_argument('--checkpoint_dir', default='svp_gnn_2025_04_14__03_16_36')
@@ -27,6 +26,18 @@ parser.add_argument('--debug', action='store_true', default=False)
 parser.add_argument('--device', type=str, default='cuda')
 parser.add_argument('--resume', type=str, default=None)
 parser.add_argument('--overwrite', action='store_true', default=False)
+parser.add_argument(
+    "--data_dir",
+    type=str,
+    default="/home/common/proj/side_chain_packing/data/FINAL/structures/casp16/casp16_native",
+    help="Path to directory of PDB structures that will be repacked"
+)
+parser.add_argument(
+    "--output_dir",
+    type=str,
+    default="",
+    help="Path to directory in which the PDB files with predicted side-chains will be deposited"
+)
 parser.add_argument('--testing_memorization', action='store_true', default=False)
 args = parser.parse_args()
 
@@ -89,46 +100,34 @@ checkpoint_path, checkpoint = get_pt(
     get_default(args.checkpoint, 'best_val')
 )
 print(f'Using checkpoint: {checkpoint_path}')
-model = PSCPAllChisNetwork(
-    top_k=config.model.top_k,
-    conv=config.model.convolution_mode,
-    separate_dense_layers=True,
-    separate_offset_layers=True).to(args.device)
+model = PSCPAllChisNetwork(conv=config.model.convolution_mode).to(args.device)
 model.load_state_dict(checkpoint['model'])
 optimizer = get_optimizer(config.train.optimizer, model)
 optimizer.load_state_dict(checkpoint['optimizer'])
 scheduler = get_scheduler(config.train.scheduler, optimizer)
 scheduler.load_state_dict(checkpoint['scheduler'])
 
-# Constructs dataset
+# Constructs dataset for inferece
 if args.testing_memorization:
-    pairs = [(
-        config.data.train_val_dir,
-        f'./inference_outputs/{os.path.basename(config.data.train_val_dir)}/{args.checkpoint_dir}_{os.path.basename(checkpoint_path).replace(".", "")}'
-    )]
+    data_dir = config.data.train_val_dir
+    output_dir = f'./inference_outputs/{os.path.basename(config.data.train_val_dir)}/{args.checkpoint_dir}_{os.path.basename(checkpoint_path).replace(".", "")}'
+    dataset = PSCPDataset(root=data_dir, subset='train')
+    dataset.dataset = dataset.dataset[:1]
 else:
-    pairs = [
-        (f'/home/common/proj/side_chain_packing/data/FINAL/structures/{casp}/{casp}_{input_type}{"_predictions" if input_type != "native" else ""}',
-            f'./inference_outputs/{casp}_{input_type}/{args.checkpoint_dir}_{os.path.basename(checkpoint_path).replace(".", "")}')
-            for casp in ("casp14", "casp15", "casp16")
-            for input_type in ("native", "af2", "af3")
-    ]
-
-for data_dir, output_dir in pairs:
-    # Loads in the dataset for inference
-    if args.testing_memorization:
-        dataset = PSCPDataset(root=data_dir, subset='train')
-        dataset.dataset = dataset.dataset[:1]
+    data_dir = args.data_dir
+    if os.path.isdir(args.output_dir):
+        output_dir = args.output_dir
     else:
-        dataset = PSCPDataset(root=data_dir)
-    data_loader = DataLoader(dataset, batch_size=config.data.test_batch_size)
+        output_dir = f'./inference_outputs/casp16_native/{args.checkpoint_dir}_{os.path.basename(checkpoint_path).replace(".", "")}'
+    dataset = PSCPDataset(root=data_dir)
+data_loader = DataLoader(dataset, batch_size=config.data.test_batch_size)
 
-    # Runs inference
-    os.makedirs(output_dir, exist_ok=True)
-    with torch.no_grad():
-        model.eval()
-        for i, batch in enumerate(tqdm(data_loader, desc="Testing")):
-            input_file = os.path.join(data_dir, f'{batch.name[0]}.pdb')
-            output_file = os.path.join(output_dir, f'{batch.name[0]}.pdb')
-            model.sample_pdb(batch, input_file, output_file)
-    print(f'Wrote predictions into {os.path.abspath(output_dir)}')
+# Runs inference
+os.makedirs(output_dir, exist_ok=True)
+with torch.no_grad():
+    model.eval()
+    for i, batch in enumerate(tqdm(data_loader, desc="Testing")):
+        input_file = os.path.join(data_dir, f'{batch.name[0]}.pdb')
+        output_file = os.path.join(output_dir, f'{batch.name[0]}.pdb')
+        model.sample_pdb(batch, input_file, output_file)
+print(f'Wrote predictions into {os.path.abspath(output_dir)}')
