@@ -143,7 +143,7 @@ def run_assess_dir(targets_dir, predictions_dir):
     stats_file_name = os.path.join(stats_dir, "stats.json")
     with open(stats_file_name, "w") as file:
         json.dump(converted, file, indent=4)
-    print(f"Saved to {stats_file_name} ")
+    print(f"Saved assessment results to {stats_file_name}")
 
 
 if __name__ == "__main__":
