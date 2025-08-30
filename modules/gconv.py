@@ -336,6 +336,7 @@ class SVGraphConvLayer(nn.Module):
     ):
         super().__init__()
         self.autoregressive = autoregressive
+
         if conv == 'gnn':
             self.conv = GNNConv(
                 node_dims, node_dims, edge_dims, 
@@ -345,6 +346,7 @@ class SVGraphConvLayer(nn.Module):
                 scalar_act=scalar_act, vector_act=vector_act,
                 share_dot_cross=False, sv_interaction=True,
             )
+
         elif conv == 'gat':
             self.conv = GATConv(
                 node_dims, node_dims, edge_dims, mlp_mode=mlp_mode,
@@ -352,6 +354,7 @@ class SVGraphConvLayer(nn.Module):
                 # aggr=aggr,
                 scalar_act=scalar_act, vector_act=vector_act
             )
+
         elif conv == 'gin':
             self.conv = GINConv(
                 node_dims, node_dims, edge_dims,
@@ -360,6 +363,7 @@ class SVGraphConvLayer(nn.Module):
                 scalar_act=scalar_act, vector_act=vector_act,
                 share_dot_cross=False, sv_interaction=True,
             )
+
         else:
             raise ValueError("Message-passing type not implemented")
 
@@ -427,6 +431,7 @@ class SVGraphConvLayer(nn.Module):
                 x = x_
 
             return x
+
         else:
             dh = self.conv(x, edge_index, edge_attr, rot=rot)
             x = self.layernorm_1(x + self.dropout_1(dh))
@@ -519,4 +524,3 @@ if __name__ == '__main__':
         print('========== Test %d ==========' % i)
         _test()
         print('\n')
-

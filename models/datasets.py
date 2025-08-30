@@ -341,9 +341,11 @@ class PSCPDataset(Dataset):
         val_dataset = PSCPDataset.__new__(PSCPDataset)
 
         # Manually initialize internals (skip __init__)
-        for obj, subset_indices, subset_name in zip([train_dataset, val_dataset],
-                                                    [train_indices, val_indices],
-                                                    ["train", "val"]):
+        for obj, subset_indices, subset_name in zip(
+            [train_dataset, val_dataset],
+            [train_indices, val_indices],
+            ["train", "val"]
+        ):
             obj.data_dir = self.data_dir
             obj.subset = subset_name  
             obj.cache_path = os.path.join(

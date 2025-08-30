@@ -1,3 +1,4 @@
+# Folders
 __pycache__/
 chi_histograms/
 figures_for_paper/
@@ -6,3 +7,6 @@ logs/
 nohup_logs/
 plddt_plots/
 tables_for_paper/
+
+# Files
+invariance_diffs.json
