@@ -15,8 +15,8 @@ from torch_geometric.data import DataLoader
 
 from models.datasets import PSCPDataset
 from models.models import PSCPAllChisNetwork
-from oagnn_utils.misc import load_config, seed_all
-from oagnn_utils.train import get_optimizer, get_scheduler
+from utils.misc import load_config, seed_all
+from utils.train import get_optimizer, get_scheduler
 
 # Parses args
 parser = argparse.ArgumentParser()

@@ -10,7 +10,7 @@ import math
 import torch.nn.functional as F
 
 import pippack.residue_constants as rc
-from oagnn_utils.misc import Counter
+from utils.misc import Counter
 
 
 logger = logging.getLogger(__name__)

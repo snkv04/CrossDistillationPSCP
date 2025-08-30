@@ -25,7 +25,7 @@ from modules.norm import SVLayerNorm
 from modules.perceptron import VectorPerceptron
 from models.datasets import _process_single_entry, _remove_unknown_flowpacker_residues, \
     _orientations, _impute_sidechain_vectors
-from oagnn_utils.misc import BlackHole
+from utils.misc import BlackHole
 from models.loss_fns import trig_loss, huber_loss
 from modules.dropout import SVDropout
 
