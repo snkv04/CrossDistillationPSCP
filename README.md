@@ -10,14 +10,14 @@ This repository contains the code associated with the paper "On overcoming PDB d
 
 ## Usage
 
-To set up the conda environment:
+To set up the Conda environment:
 
 ```
 conda env create -f conda_envs/dw6.yml
 conda activate dw6
 ```
 
-Configurations such as the path to the directory containing the dataset of PDB files to train on can be set in `configs/svp_gnn.yml`. To train the model:
+Configurations such as the path to the directory containing the dataset of PDB files to train on can be set in `./models/configs/svp_gnn.yml`. To train the model:
 
 ```
 python -m scripts.train_allchis
