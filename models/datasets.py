@@ -23,48 +23,6 @@ from flowpacker.dataset_cluster import get_features
 import openfold.np.residue_constants as rc
 
 
-def _normalize(tensor, dim=-1):
-    '''
-    Normalizes a `torch.Tensor` along dimension `dim` without `nan`s.
-    '''
-    return torch.nan_to_num(
-        torch.div(tensor, torch.norm(tensor, dim=dim, keepdim=True)))
-
-
-def _orientations(pos_CA, resseq=None, mask_out_noncontiguous_residues=False, device=None):
-    X = pos_CA
-    forward = _normalize(X[1:] - X[:-1])
-    backward = _normalize(X[:-1] - X[1:])
-    forward = F.pad(forward, [0, 0, 0, 1])
-    backward = F.pad(backward, [0, 0, 1, 0])
-    if mask_out_noncontiguous_residues:
-        assert resseq is not None
-        indices = torch.tensor(resseq, device=device)
-        assert indices.shape[0] == pos_CA.shape[0]
-
-        forward_mask, backward_mask = (torch.zeros_like(indices, dtype=torch.bool)
-                                       for _ in range(2))
-        adjacent_is_contiguous = (indices[1:] == indices[:-1] + 1)
-        forward_mask[:-1] = adjacent_is_contiguous
-        backward_mask[1:] = adjacent_is_contiguous
-
-        forward = forward * forward_mask[:, None]
-        backward = backward * backward_mask[:, None]
-    return torch.cat([forward.unsqueeze(-2), backward.unsqueeze(-2)], -2)
-
-
-# TODO: Either use this or AttnPacker's implementation; no need to duplicate the same functionality
-# across functions
-def _impute_cb_vectors(pos_N, pos_CA, pos_C):
-    X = torch.cat([pos_N.view(-1, 1, 3), pos_CA.view(-1, 1, 3), pos_C.view(-1, 1, 3)], dim=1)   # (N, 3, 3)
-    n, origin, c = X[:, 0], X[:, 1], X[:, 2]
-    c, n = _normalize(c - origin), _normalize(n - origin)
-    bisector = _normalize(c + n)
-    perp = _normalize(torch.cross(c, n))
-    vec = -bisector * math.sqrt(1 / 3) - perp * math.sqrt(2 / 3)
-    return vec 
-
-
 def _dist(r1, r2):
     r1, r2 = np.array(r1), np.array(r2)
     return np.sqrt(np.sum((r1 - r2) ** 2))
@@ -212,11 +170,6 @@ def _process_single_entry(
         # Imputes the position of the carbon beta atoms per residue
         imputed_pos_CB = impute_cb(protein, protein)[0].get_atom_coords('CB')
 
-        # Computes per-node vector features
-        orientations = _orientations(pos_CA=pos_CA)
-        imputed_sidechain_vectors = _impute_cb_vectors(pos_N=pos_N, pos_CA=pos_CA, pos_C=pos_C)
-        node_v = torch.cat([orientations, imputed_sidechain_vectors.unsqueeze(-2)], dim=-2)
-
         # Gets secondary structure information
         dssp = pydssp.assign(bb_coords, out_type='c3')
         ss_as_str = ''.join(list(dssp)).replace('-', 'C')
@@ -243,7 +196,6 @@ def _process_single_entry(
             chis = chis,
             chis_sin_cos = chis_sin_cos,
             chi_mask = chi_mask,
-            node_v = node_v,
             imputed_pos_CB = imputed_pos_CB,
             secondary_structure = ss_as_str,
             atom14_coords = atom14_coords,
