@@ -367,7 +367,7 @@ def get_loss_weights(epoch=1):
         # Chi angle-based loss terms
         "chi_nll_loss_weight": 1.0,
         "offset_mse_loss_weight": 100.0,
-        "rotamer_recovery_weight": 0.0,
+        "rotamer_recovery_weight": 0.0, # Recovery rate is not differentiable 💀
         
         # Coordinate-based loss terms
         # "rmsd_loss_weight": linear_anneal_clamped(epoch=epoch),

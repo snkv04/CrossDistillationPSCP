@@ -10,7 +10,6 @@ import math
 import torch.nn.functional as F
 
 import pippack.residue_constants as rc
-from utils.misc import Counter
 
 
 logger = logging.getLogger(__name__)
@@ -113,14 +112,6 @@ class BlackHole:
     def __getattr__(self, name):
         return self
     
-
-def count_nans(tensor: torch.Tensor, prefix=""):
-    try:
-        num_nans = torch.isnan(tensor).sum()
-        if num_nans:
-            print(prefix + "nan count = " + str(num_nans))
-    except Exception as e:
-        pass
 
 def masked_mean(mask: torch.Tensor, value: torch.Tensor, dim: Optional[Union[int, Tuple[int]]] = None, eps: float = 1e-4) -> torch.Tensor:
     
@@ -234,39 +225,35 @@ def pi_periodic_rotamer(CH_pred, CH_true, S):
 
 
 def rotamer_recovery_from_coords(
-        S, true_SC_D, pred_SC_D, residue_mask, SC_D_mask, chi_num=None,
-        return_raw=False, return_chis=False, exclude_AG=True, _metric=None):
-    
-    counter = Counter()
-
+    S,
+    true_SC_D,
+    pred_SC_D,
+    residue_mask,
+    SC_D_mask,
+    chi_num=None,
+    return_raw=False,
+    return_chis=False,
+    exclude_AG=True,
+    _metric=None
+):
     # Compute true and predicted chi dihedrals (in degrees)
     CH_true = true_SC_D * 180. / math.pi
     CH_pred = pred_SC_D * 180. / math.pi
-    # print(f'CH_pred.requires_grad = {CH_pred.requires_grad}')
 
     # Determine correct chis based on angle difference
     angle_diff_chis = (torch.abs(CH_true - CH_pred) <= 20.0) * SC_D_mask # [B, L, 4]
-    count_nans(angle_diff_chis, prefix=f"in RR loss, loc={counter.step()}, ")
-    # print(f'angle_diff_chis.rqeuires_grad = {angle_diff_chis.requires_grad}')
 
     # Determine correct chis based on non-existant chis
     nonexistent_chis = (1. - SC_D_mask.to(torch.int)).to(torch.bool) # [B, L, 4]
-    count_nans(nonexistent_chis, prefix=f"in RR loss, loc={counter.step()}, ")
 
     # Determine correct chis based on wrapping of dihedral angles around -180. and 180.
     wrapped_chis = wrapped_chi_angle(CH_pred, CH_true) * SC_D_mask # [B, L, 4]
-    count_nans(wrapped_chis, prefix=f"in RR loss, loc={counter.step()}, ")
-    # print(f'wrapped_chis.requires_grad = {wrapped_chis.requires_grad}')
 
     # Determine correct chis based on periodic chis
     periodic_chis = pi_periodic_rotamer(CH_pred, CH_true, S) * SC_D_mask # [B, L, 4]
-    count_nans(periodic_chis, prefix=f"in RR loss, loc={counter.step()}, ")
-    # print(f'preiodic chis requires grad = {periodic_chis.requires_grad}')
     
     # Sum to determine correct chis
     correct_chis = angle_diff_chis + nonexistent_chis + wrapped_chis + periodic_chis # [B, L, 4]
-    count_nans(correct_chis, prefix=f"in RR loss, loc={counter.step()}, ")
-    # print(f'correct_chis.requires_grad = {correct_chis.requires_grad}')
 
     # Determine correct rotamers based on all correct chi if no chi num is given,
     # otherwise treat a residue as correct if the corresponding chi num is correct
@@ -275,8 +262,6 @@ def rotamer_recovery_from_coords(
     else:
         chi_idx = chi_num - 1
         correct_rotamer = correct_chis[..., chi_idx]
-    count_nans(correct_rotamer, prefix=f"in RR loss, loc={counter.step()}, ")
-    # print(f'correct_rotamer.requires_grad = {correct_rotamer.requires_grad}')
     
     # Exclude Ala and Gly
     if exclude_AG:
@@ -289,8 +274,6 @@ def rotamer_recovery_from_coords(
         rr = _metric(correct_rotamer, residue_mask)
     else:
         rr = masked_mean(residue_mask, correct_rotamer, dim=-1)
-        # print(f'rr.requires_grad = {rr.requires_grad}')
-    count_nans(rr, prefix=f"in RR loss, loc={counter.step()}, ")
 
     if return_raw:
         return correct_rotamer
@@ -299,42 +282,17 @@ def rotamer_recovery_from_coords(
     else:
         # TODO: Refactor the other output modes as well to invert the
         # recovery rate loss so that lower is better
-        # print(f'1 minus requires grad = {(1 - torch.mean(rr)).requires_grad}')
         return 1 - torch.mean(rr)
 
-def find_out_of_range_bins(tensor, n_bins=72):
-    """
-    Returns a dict mapping each out-of-range value in the input tensor to its count.
-
-    Args:
-        tensor (torch.Tensor): Tensor of bin indices.
-        min_val (int): Minimum valid value (inclusive).
-        max_val (int): Maximum valid value (inclusive).
-
-    Returns:
-        dict: {invalid_value: count}
-    """
-    min_val = 0
-    max_val = n_bins - 1
-
-    invalid_mask = (tensor < min_val) | (tensor > max_val)
-    if not torch.any(invalid_mask):
-        return {}
-
-    invalid_vals = tensor[invalid_mask].cpu().tolist()
-    value_counts = {}
-    for val in invalid_vals:
-        value_counts[val] = value_counts.get(val, 0) + 1
-    return value_counts
-
 def nll_chi_loss(
-        chi_log_probs,
-        true_chi_bin,
-        sequence,
-        chi_mask,
-        avg_bb_plddt=None,
-        chi_num=None,
-        _metric=None):
+    chi_log_probs,
+    true_chi_bin,
+    sequence,
+    chi_mask,
+    avg_bb_plddt=None,
+    chi_num=None,
+    _metric=None
+):
     """ Negative log probabilities for binned chi prediction """
 
     # Get which chis are pi periodic
@@ -344,42 +302,12 @@ def nll_chi_loss(
         residue_type_one_hot.type(chi_log_probs.dtype),
         chi_mask.new_tensor(np.array(rc.chi_pi_periodic))
     )
-    counter = Counter()
 
     # Create shifted true chi bin for the pi periodic chis
     n_bins = chi_log_probs.shape[-1]
     shift_val = (n_bins - 1) // 2
     shift = (true_chi_bin >= shift_val) * -shift_val + (true_chi_bin < shift_val) * shift_val
     true_chi_bin_shifted = true_chi_bin + shift * chi_pi_periodic
-    count_nans(true_chi_bin_shifted, prefix=f"in NLL loss, loc={counter.step()}, ")
-
-    # ======================
-    # Debugging
-    # TODO: Delete this
-    if find_out_of_range_bins(true_chi_bin):
-        raise ValueError(
-            f"true_chi_bin has invalid bin values: {find_out_of_range_bins(true_chi_bin)}"
-        )
-    if find_out_of_range_bins(true_chi_bin_shifted):
-        raise ValueError(
-            f"true_chi_bin has invalid bin values: {find_out_of_range_bins(true_chi_bin_shifted)}"
-        )
-    if not torch.isfinite(chi_log_probs).all():
-        inf_mask = chi_log_probs == float('inf')
-        ninf_mask = chi_log_probs == float('-inf')
-        num_inf = inf_mask.sum().item()
-        num_ninf = ninf_mask.sum().item()
-        print(f"chi_log_probs contains {num_inf} +inf and {num_ninf} -inf values before clamping.")
-
-    # low_mask = chi_log_probs < -100
-    # high_mask = chi_log_probs > 100
-    # num_low = low_mask.sum().item()
-    # num_high = high_mask.sum().item()
-    # if num_low > 0 or num_high > 0:
-    #     print(f"chi_log_probs contains {num_low} values < -100 and {num_high} values > 100.")
-    
-    chi_log_probs = torch.clamp(chi_log_probs, min=-100, max=100)
-    # ======================
 
     # NLL loss for shifted and unshifted predictions
     criterion = torch.nn.NLLLoss(reduction='none')
@@ -389,8 +317,6 @@ def nll_chi_loss(
     loss_shifted = criterion(
         chi_log_probs.contiguous().view(-1, n_bins), true_chi_bin_shifted.long().contiguous().view(-1)
     ).view(true_chi_bin.size())
-    count_nans(loss, prefix=f"in NLL loss, loc={counter.step()}, ")
-    count_nans(loss_shifted, prefix=f"in NLL loss, loc={counter.step()}, ")
 
     # Determine masked loss and loss average
     loss = torch.minimum(loss, loss_shifted) * chi_mask
@@ -399,14 +325,12 @@ def nll_chi_loss(
         chi_idx = chi_num - 1
         loss = loss[:, chi_idx]
         chi_mask = chi_mask[:, chi_idx]
-    count_nans(loss, prefix=f"in NLL loss, loc={counter.step()}, ")
 
     # Weights the losses by confidence
     if avg_bb_plddt is None:
         avg_bb_plddt = torch.ones_like(sequence)
     weighted_loss = avg_bb_plddt.unsqueeze(-1) * loss
     loss_av = torch.sum(weighted_loss) / torch.sum(chi_mask)
-    count_nans(loss_av, prefix=f"in NLL loss, loc={counter.step()}, ")
     
     # if _metric is not None and not isinstance(_metric, BlackHole):
     #     print(f'In nll_chi_loss, _metric = {_metric}')
@@ -414,68 +338,18 @@ def nll_chi_loss(
     
     return loss_av
 
-# def nll_chi_loss_one_chi(
-#     chi_log_probs,         # (N, num_bins)
-#     true_chi_bin,          # (N,)
-#     sequence,              # (N,)
-#     chi_mask,              # (N, 4)
-#     chi_num,               # int in {1, 2, 3, 4}
-#     _metric=None,
-# ):
-#     assert 1 <= chi_num <= 4, "chi_num must be 1, 2, 3, or 4"
-#     chi_i = chi_num - 1  # convert to 0-based index
-
-#     # Extract relevant data for this chi angle
-#     chi_log_probs_i = chi_log_probs         # (N, num_bins)
-#     true_chi_bin_i = true_chi_bin           # (N,)
-#     chi_mask_i = chi_mask[:, chi_i]         # (N,)
-
-#     # Determine which residues have pi-periodic chi angles
-#     residue_type_one_hot = F.one_hot(sequence.long(), num_classes=21)  # (N, 21)
-#     chi_pi_periodic = torch.tensor(np.array(rc.chi_pi_periodic), device=chi_log_probs.device, dtype=chi_log_probs.dtype)  # (21, 4)
-#     is_pi_periodic = torch.matmul(residue_type_one_hot.type(chi_log_probs.dtype), chi_pi_periodic[:, chi_i])  # (N,)
-
-#     # Compute shifted bin for pi-periodic chi angles
-#     n_bins = chi_log_probs_i.shape[-1]
-#     shift_val = n_bins // 2
-#     shift = ((true_chi_bin_i >= shift_val).long() * -shift_val +
-#              (true_chi_bin_i < shift_val).long() * shift_val)
-#     true_chi_bin_shifted = true_chi_bin_i + shift * is_pi_periodic.long()  # (N,)
-
-#     # Compute NLL loss for original and shifted labels
-#     criterion = torch.nn.NLLLoss(reduction='none')
-#     loss_unshifted = criterion(chi_log_probs_i, true_chi_bin_i)
-#     loss_shifted = criterion(chi_log_probs_i, true_chi_bin_shifted)
-
-#     # Use the minimum between original and shifted
-#     loss = torch.minimum(loss_unshifted, loss_shifted)
-
-#     # Apply chi mask
-#     loss = loss * chi_mask_i
-#     loss_av = torch.sum(loss) / torch.sum(chi_mask_i)
-
-#     # Optionally track metric
-#     if _metric is not None and not isinstance(_metric, BlackHole):
-#         loss_av = _metric(loss, chi_mask_i)
-
-#     return loss_av
-
-
 def offset_mse(
-        offset_pred,
-        offset_true,
-        mask,
-        n_chi_bin=36,
-        scale_pred=True,
-        avg_bb_plddt=None,
-        chi_num=None,
-        _metric=None):
+    offset_pred,
+    offset_true,
+    mask,
+    n_chi_bin=36,
+    scale_pred=True,
+    avg_bb_plddt=None,
+    chi_num=None,
+    _metric=None
+):
     if scale_pred:
         offset_pred = (2 * torch.pi / n_chi_bin) * offset_pred
-
-    counter = Counter()
-    count_nans(offset_pred, prefix=f"in offset loss, loc={counter.step()}, ")
-    count_nans(offset_true, prefix=f"in offset loss, loc={counter.step()}, ")
         
     # Mean per chi
     if chi_num is not None:
@@ -493,7 +367,6 @@ def offset_mse(
     squared_diffs = (offset_pred - offset_true) ** 2
     weighted_diffs = avg_bb_plddt.unsqueeze(-1) * squared_diffs
     err = torch.sum(mask * weighted_diffs) / torch.sum(mask)
-    count_nans(err, prefix=f"in offset loss, loc={counter.step()}, ")
     
     # if _metric is not None and not isinstance(_metric, BlackHole):
     #     err = _metric((offset_pred - offset_true) ** 2, mask)
@@ -532,25 +405,21 @@ def get_renamed_coords(X: torch.Tensor, S: torch.Tensor, pseudo_renaming: bool =
 
 
 def sc_rmsd(
-        decoy_X,
-        true_X,
-        S, X_mask,
-        residue_mask,
-        avg_bb_plddt=None,
-        _metric=None,
-        use_sqrt=False,
-        per_residue_first=True):
-    counter = Counter()
-    
+    decoy_X,
+    true_X,
+    S, X_mask,
+    residue_mask,
+    avg_bb_plddt=None,
+    _metric=None,
+    use_sqrt=False,
+    per_residue_first=True
+):    
     # Compute atom deviation based on original coordinates
     atom_deviation = torch.sum(torch.square(decoy_X - true_X), dim=-1)
-    count_nans(atom_deviation, prefix=f"in rmsd loss, loc={counter.step()}, ")
 
     # Compute atom deviation based on alternative coordinates
     true_renamed_X = get_renamed_coords(true_X, S)
     renamed_atom_deviation = torch.sum(torch.square(decoy_X - true_renamed_X), dim=-1)
-    count_nans(true_renamed_X, prefix=f"in rmsd loss, loc={counter.step()}, ")
-    count_nans(renamed_atom_deviation, prefix=f"in rmsd loss, loc={counter.step()}, ")
     
     # Get atom mask including backbone atoms
     atom_mask = X_mask * residue_mask[..., None]
@@ -567,9 +436,6 @@ def sc_rmsd(
             rmsd_og,
             rmsd_renamed
         )
-        count_nans(rmsd_og, prefix=f"in rmsd loss, loc={counter.step()}, ")
-        count_nans(rmsd_renamed, prefix=f"in rmsd loss, loc={counter.step()}, ")
-        count_nans(rmsd, prefix=f"in rmsd loss, loc={counter.step()}, ")
 
         # Applies weighting based on pLDDT
         if avg_bb_plddt is None:
@@ -586,9 +452,9 @@ def sc_rmsd(
         # else:
         #     mse = masked_mean(residue_mask, rmsd, dim=-1)
         mse = masked_mean(residue_mask, weighted_rmsd, dim=-1)
-        count_nans(mse, prefix=f"in rmsd loss, loc={counter.step()}, ")
         
         return mse
+
     else:
         rmsd_og = masked_mean(atom_mask, atom_deviation, tuple(range(atom_mask.ndim)))
         rmsd_renamed = masked_mean(atom_mask, renamed_atom_deviation, tuple(range(atom_mask.ndim)))
