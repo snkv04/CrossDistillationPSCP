@@ -1,4 +1,4 @@
-"""Adapted from https://github.com/Kuhlman-Lab/PIPPack"""
+"""Directly retrieved from https://github.com/Kuhlman-Lab/PIPPack"""
 
 import os
 
@@ -7,7 +7,6 @@ os.environ['OPENBLAS_NUM_THREADS'] = '4'
 os.environ['MKL_NUM_THREADS'] = '4'
 os.environ['OMP_NUM_THREADS'] = '4'
 
-import argparse
 import time, glob
 from functools import partial
 from multiprocessing import Pool
@@ -67,17 +66,12 @@ def main(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
     # Construct work list of input PDBs and output PDBs
-    print(f"here")
     pdb_list = sorted(glob.glob(os.path.join(args.data_dir, "*.pdb")))
-    # print(f"pdb list = {pdb_list}")
     work_list = []
     for pdb_in in pdb_list:
         pdb_out = os.path.join(args.out_dir, os.path.basename(pdb_in))
         if args.overwrite or os.path.basename(pdb_out) not in os.listdir(args.out_dir):
             work_list.append((pdb_in, pdb_out))
-    
-    for item in work_list:
-        print(f"item = {item}")
     
     # Run minimization
     with Pool(args.n_thread) as p:
@@ -88,12 +82,12 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Rosetta Side Chain Minimization",
                             epilog="Run Rosetta minimization on protein side chains.",
                             formatter_class=ArgumentDefaultsHelpFormatter)
-    # parser.add_argument('data_dir',
-    #                     type=str, default=None,
-    #                     help='Directory containing pdb files to minimize side chains.')
-    # parser.add_argument('--out_dir',
-    #                     default=None, type=str,
-    #                     help="Directory to store outputs. Default is <data_dir>_rosetta_min.")
+    parser.add_argument('data_dir',
+                        type=str, default=None,
+                        help='Directory containing pdb files to minimize side chains.')
+    parser.add_argument('--out_dir',
+                        default=None, type=str,
+                        help="Directory to store outputs. Default is <data_dir>_rosetta_min.")
     parser.add_argument('--fa_rep',
                         type=float, default=0.55,
                         help="Weight for fa_rep score term in ref2015")
@@ -105,25 +99,12 @@ if __name__ == "__main__":
     parser.add_argument("--restrict_aa",
                         type=str, default='',
                         help="Comma-separated list of which amino acids to restrict from minimization.")
-    parser.add_argument('--checkpoint_name',
-                        type=str,
-                        default='20250829_221150_asdf_2pt')
-
     args = parser.parse_args()
 
-    # if args.out_dir is None:
-    #     args.data_dir = args.data_dir[:-1] if args.data_dir[-1] == os.path.sep else args.data_dir
-    #     args.out_dir = args.data_dir + f"_rosetta_min"
+    if args.out_dir is None:
+        args.data_dir = args.data_dir[:-1] if args.data_dir[-1] == os.path.sep else args.data_dir
+        args.out_dir = args.data_dir + f"_rosetta_min"
 
     args.restrict_aa = args.restrict_aa.split(',')
 
-    CASPS = ("casp14", "casp15", "casp16")
-    BB_TYPES = ("native", "af2", "af3")
-    for casp in CASPS:
-        for bb_type in BB_TYPES:
-            args.data_dir = f"/home/common/proj/side_chain_packing/code/CrossDistillationPSCP/inference_outputs/{casp}_{bb_type}/{args.checkpoint_name}"
-            args.out_dir = args.data_dir + "_rosetta_min"
-
-            main(args)
-
-            print(f'Wrote outputs of minimization to: {args.out_dir}')
+    main(args)
