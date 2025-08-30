@@ -36,7 +36,7 @@ from protein_learning.models.utils.dataset_augment_fns import impute_cb
 from protein_learning.models.inference_utils import set_canonical_coords_n_masks
 from protein_learning.common.helpers import safe_normalize
 from protein_learning.assessment.sidechain import debug
-from flowpacker_dataset_cluster import get_features
+from flowpacker.dataset_cluster import get_features
 import openfold.np.residue_constants as rc
 
 

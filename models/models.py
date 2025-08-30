@@ -40,10 +40,10 @@ from protein_learning.features.input_features import PI
 from protein_learning.assessment.sidechain import debug
 
 # FlowPacker imports
-from utils.sidechain_utils import Idealizer
-from flowpacker_dataset_cluster import get_features
-from utils.constants import atom14_mask as atom_mask_true
-from utils.structure_utils import create_structure_from_crds
+from flowpacker.utils.sidechain_utils import Idealizer
+from flowpacker.dataset_cluster import get_features
+from flowpacker.utils.constants import atom14_mask as atom_mask_true
+from flowpacker.utils.structure_utils import create_structure_from_crds
 
 # PIPPack imports
 from pippack.loss import rotamer_recovery_from_coords, nll_chi_loss, offset_mse, supervised_chi_loss, \

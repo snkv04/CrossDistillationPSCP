@@ -14,8 +14,7 @@ from openfold.utils.feats import (
     torsion_angles_to_frames,
 )
 from openfold.utils.rigid_utils import Rigid
-from utils.constants import chi_true_indices, chi_mask
-# from biotite.structure import dihedral
+from flowpacker.utils.constants import chi_true_indices, chi_mask
 
 class Idealizer(nn.Module):
     def __init__(self, use_native_bb_coords=True):
