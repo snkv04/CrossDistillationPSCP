@@ -1,4 +1,4 @@
-"""Adapted from https://github.com/MattMcPartlon/AttnPacker"""
+"""Retrieved from https://github.com/MattMcPartlon/AttnPacker"""
 
 import torch
 from torch import Tensor
@@ -28,7 +28,7 @@ def signed_dihedral_4(
     # switch to higher precision dtype
     p0, p1, p2, p3 = ps
     device_type = "cpu" if p0.device.type == "cpu" else "cuda"
-    with disable_tf32(), torch.autocast(device_type=device_type, enabled=False):
+    with disable_tf32():
         b0, b1, b2 = p0 - p1, p2 - p1, p3 - p2
         mask = torch.norm(b1, dim=-1) > 1e-7
         b1 = torch.clamp_min(b1, 1e-6)
@@ -51,7 +51,7 @@ def signed_dihedral_all_12(ps: List[Tensor]) -> Tensor:
     :return:
     """
     device_type = "cpu" if ps[0].device.type == "cpu" else "cuda"
-    with disable_tf32(), torch.autocast(device_type=device_type, enabled=False):
+    with disable_tf32():
         p0, p1, p2, p3 = ps
         b0, b1, b2 = p0 - p1, p2.unsqueeze(-3) - p1.unsqueeze(-2), p3 - p2
         b1 = b1 / torch.norm(b1, dim=-1, keepdim=True).clamp_min(min_norm_clamp)
@@ -69,7 +69,7 @@ def signed_dihedral_all_123(ps) -> Tensor:
     :return:
     """
     device_type = "cpu" if ps[0].device.type == "cpu" else "cuda"
-    with disable_tf32(), torch.autocast(device_type=device_type, enabled=False):
+    with disable_tf32():
         p0, p1, p2, p3 = ps
         b0, b1, b2 = p0 - p1, p2 - p1, p3.unsqueeze(-3) - p2.unsqueeze(-2)
         b1 = b1 / torch.norm(b1, dim=-1, keepdim=True).clamp_min(min_norm_clamp)
@@ -88,7 +88,7 @@ def unsigned_angle_all(ps: List[Tensor]) -> Tensor:
     by ps0[i],ps1[i] and ps[1,i],ps[2,j].
     """
     device_type = "cpu" if ps[0].device.type == "cpu" else "cuda"
-    with disable_tf32(), torch.autocast(device_type=device_type, enabled=False):
+    with disable_tf32():
         p0, p1, p2 = ps[0], ps[1], ps[2]
         b01, b12 = p0 - p1, p2.unsqueeze(-3) - p1.unsqueeze(-2)
         M = b01.unsqueeze(-2) * b12

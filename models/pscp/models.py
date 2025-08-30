@@ -1,0 +1,1181 @@
+import functools
+import numpy as np
+import yaml
+from types import SimpleNamespace
+import os
+import json
+import math
+from typing import *
+
+import torch
+from torch import nn
+from torch.distributions import Categorical
+import torch_scatter
+import torch_cluster
+from tqdm import tqdm
+from einops import rearrange
+from torch_geometric.data import Batch
+from torch.nn import functional as F
+
+from modules.linear import rotate_apply
+from modules.common import ScalarVector
+from modules.gconv import SVGraphConvLayer
+from modules.geometric import construct_3d_basis
+from modules.norm import SVLayerNorm
+from modules.perceptron import VectorPerceptron
+from models.pscp.datasets import _process_single_entry, _remove_unknown_flowpacker_residues, \
+    _orientations, _impute_sidechain_vectors
+from oagnn_utils.misc import BlackHole
+from models.pscp.loss_fns import trig_loss, huber_loss
+from modules.dropout import SVDropout
+
+# AttnPacker imports
+from protein_learning.models.model_abc import train
+from protein_learning.features.input_embedding import InputEmbedding
+from protein_learning.models.utils.dataset_augment_fns import impute_cb
+from protein_learning.models.fbb_design.train import _augment
+from protein_learning.models.inference_utils import set_canonical_coords_n_masks
+from protein_learning.common.data.data_types.model_input import ModelInput
+from protein_learning.features.input_features import PI
+from protein_learning.assessment.sidechain import debug
+
+# FlowPacker imports
+from utils.sidechain_utils import Idealizer
+from flowpacker_dataset_cluster import get_features
+from utils.constants import atom14_mask as atom_mask_true
+from utils.structure_utils import create_structure_from_crds
+
+# PIPPack imports
+from pippack_loss import rotamer_recovery_from_coords, nll_chi_loss, offset_mse, supervised_chi_loss, \
+    BlackHole, sc_rmsd, local_interresidue_sc_clash_loss, unclosed_proline_loss, MetricLogger
+
+
+def _normalize(tensor, dim=-1):
+    '''
+    Normalizes a `torch.Tensor` along dimension `dim` without `nan`s.
+    '''
+    return torch.nan_to_num(
+        torch.div(tensor, torch.norm(tensor, dim=dim, keepdim=True)))
+
+
+def _rbf(D, D_min=0., D_max=20., D_count=16, device='cuda'):
+    '''
+    From https://github.com/jingraham/neurips19-graph-protein-design
+    
+    Returns an RBF embedding of `torch.Tensor` `D` along a new axis=-1.
+    That is, if `D` has shape [...dims], then the returned tensor will have
+    shape [...dims, D_count].
+    '''
+    D_mu = torch.linspace(D_min, D_max, D_count, device=device)
+    D_mu = D_mu.view([1, -1])
+    D_sigma = (D_max - D_min) / D_count
+    D_expand = torch.unsqueeze(D, -1)
+
+    RBF = torch.exp(-((D_expand - D_mu) / D_sigma) ** 2)
+    return RBF
+
+
+def _positional_embeddings(edge_index, num_embeddings=None, period_range=[2, 1000], device='cuda'):
+    # From https://github.com/jingraham/neurips19-graph-protein-design
+    d = edge_index[0] - edge_index[1]
+    
+    frequency = torch.exp(
+        torch.arange(0, num_embeddings, 2, dtype=torch.float32, device=device)
+        * -(np.log(10000.0) / num_embeddings)
+    )
+    angles = d.unsqueeze(-1) * frequency
+    E = torch.cat((torch.cos(angles), torch.sin(angles)), -1)
+    return E
+
+
+def _repeat_graph(h_node, h_edge, edge_index, n_samples, device):
+    L = h_node.s.size(0)
+    h_node = ScalarVector(
+        s = h_node.s.repeat(n_samples, 1),
+        v = h_node.v.repeat(n_samples, 1, 1),
+    )
+    h_edge = ScalarVector(
+        s = h_edge.s.repeat(n_samples, 1),
+        v = h_edge.v.repeat(n_samples, 1, 1),
+    )
+    edge_index = edge_index.expand(n_samples, -1, -1)
+    offset = L * torch.arange(n_samples, device=device).view(-1, 1, 1)
+    edge_index = torch.cat(tuple(edge_index + offset), dim=-1)
+    return h_node, h_edge, edge_index
+
+
+def _get_ss_tensor(ss_str, device):
+    to_indices = {
+        'C': 0, # loop / coil
+        'H': 1, # alpha helix
+        'E': 2, # beta sheet
+    }
+    as_indices = torch.Tensor([to_indices[c] for c in ss_str]).long().to(device)
+    one_hot = F.one_hot(as_indices, num_classes=len(to_indices)).float()
+    return one_hot
+
+
+def _histogram(vals, output_path, xlabel='', ylabel='', title='', num_bins=100):
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    if isinstance(vals, torch.Tensor):
+        print(f'vals.shape = {vals.shape}')
+        vals = vals.flatten().cpu().numpy()
+    plt.hist(vals, bins=num_bins)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    vmin, vmax = min(vals), max(vals)
+    plt.axvline(vmin, color='red', linestyle='dashed', linewidth=1)
+    plt.axvline(vmax, color='red', linestyle='dashed', linewidth=1)
+    plt.text(vmin, plt.ylim()[1]*0.9, f"Min: {vmin:.2f}", color='red', ha='right')
+    plt.text(vmax, plt.ylim()[1]*0.9, f"Max: {vmax:.2f}", color='red', ha='left')
+    plt.savefig(output_path)
+    print(f'Saved plot to {output_path}')
+    plt.close()
+
+
+class SVGraphConvLayerAutoRegressive(SVGraphConvLayer):
+    """
+    Don't need to use this class anymore. Just pass autoregressive=true
+    into SVGraphConvLayer
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # print("called super init on svgraphconv autoreg")
+
+    def forward(
+        self,
+        x: ScalarVector,
+        edge_index,
+        edge_attr: ScalarVector,
+        autoregressive_x,
+        node_mask=None,
+        rot=None
+    ):
+        idx_i, idx_j = edge_index   # (E, ), messages flow from j to i ( j -> i )
+        mask = idx_j < idx_i        # (E, )
+        edge_index_forward  = edge_index[:, mask]
+        edge_index_backward = edge_index[:, ~mask]
+        edge_attr_forward  = edge_attr[mask]
+        edge_attr_backward = edge_attr[~mask]
+
+        # print(f"about to do self.conv")
+        # print(f'idx_i = {idx_i}')
+        # print(f'idx_j = {idx_j}')
+        # print(f"shapes:")
+        # print(f"    x.s.shape = {x.s.shape}")
+        # print(f"    x.v.shape = {x.v.shape}")
+        # print(f"    idx_i.shape = {idx_i.shape}")
+        # print(f"    idx_j.shape = {idx_j.shape}")
+        # print(f"    mask.shape = {mask.shape}")
+        # print(f"    edge_index_forward.shape = {edge_index_forward.shape}")
+        # print(f"    edge_index_backward.shape = {edge_index_backward.shape}")
+        # print(f"    edge_attr_forward.s.shape = {edge_attr_forward.s.shape}")
+        # print(f"    edge_attr_forward.v.shape = {edge_attr_forward.v.shape}")
+        # print(f"    edge_attr_backward.s.shape = {edge_attr_backward.s.shape}")
+        # print(f"    edge_attr_backward.v.shape = {edge_attr_backward.v.shape}")
+        dh = self.conv(x, edge_index_forward, edge_attr_forward) + self.conv(autoregressive_x, edge_index_backward, edge_attr_backward)
+        # print(f"finished self.conv")
+        count = torch_scatter.scatter_add(torch.ones_like(idx_i), idx_i, dim_size=dh.s.size(0)).clamp(min=1).unsqueeze(-1)    # (N, 1)
+        dh.s = dh.s / count
+        dh.v = dh.v / count.unsqueeze(-1)
+
+        if node_mask is not None:
+            x_ = x
+            x = x[node_mask]
+            dh = dh[node_mask]
+
+        x = self.layernorm_1(x + self.dropout_1(dh))
+
+        dh = rotate_apply(self.ff_func, x, rot)
+        x = self.layernorm_2(x + self.dropout_2(dh))
+
+        if node_mask is not None:
+            x_.s[node_mask] = x.s
+            x_.v[node_mask] = x.v
+            x = x_
+
+        return x
+
+
+class PSCPAllChisNetwork(nn.Module):
+    def __init__(
+        self,
+        node_hid_dims=(128, 32), edge_hid_dims=(64, 16),
+        num_layers=3, drop_rate=0.1, top_k=30, aa_embed_dim=20,
+        num_rbf=16, num_positional_embeddings=16,
+        node_out_s_dim=2,
+        predict_binned_chis=True, num_chi_bins=72,
+        perceptron_mode='svp', conv='gnn', no_vec=False,
+        separate_dense_layers=True, separate_offset_layers=True,
+        recycle_chi_bin_probs=False, recycle_chi_sincos=False, recycle_sc_coords=False,
+        mask_front_and_back_vec=False, unet=True, aa_embeds_on_back_edges=True,
+        use_svp_for_dense_and_offset=True
+    ):
+        super().__init__()
+        self.top_k = top_k
+        self.num_rbf = num_rbf
+        self.num_positional_embeddings = num_positional_embeddings
+        self.dummy = nn.Parameter(torch.empty(0))
+        self.no_vec = no_vec
+        self.predict_binned_chis = predict_binned_chis
+        self.num_chi_bins = num_chi_bins
+        self.eps = 1e-12
+        self.separate_dense_layers = separate_dense_layers
+        self.separate_offset_layers = separate_offset_layers
+        self.unet = unet
+        self.aa_embeds_on_back_edges = aa_embeds_on_back_edges
+        self.use_svp_for_dense_and_offset = use_svp_for_dense_and_offset
+        # print(f'separate dense = {self.separate_dense_layers}')
+        # print(f'separate offset = {self.separate_offset_layers}')
+
+        Perceptron_ = functools.partial(VectorPerceptron, mode=perceptron_mode)
+
+        # ================ AttnPacker input features ================
+        # Setting up feature generation
+        self.arg_groups = self._get_arg_groups()
+        self.input_feature_config = train.get_input_feature_config(
+            self.arg_groups,
+            pad_embeddings=True,
+            extra_pair_feat_dim=0,
+            extra_res_feat_dim=0,
+        )
+        self.feat_gen = train.get_feature_gen(
+            self.arg_groups,
+            self.input_feature_config,
+            apply_masks=True,
+        )
+
+        # For input embedding
+        self.input_embedding = InputEmbedding(self.input_feature_config)
+        self.node_s_in_dim, self.edge_s_in_dim = self.input_embedding.dims # 115, 205
+        self.node_s_in_dim += 3 # for secondary structure encodings
+        # ===========================================================
+
+        # Initial embedding of node features
+        self.mask_front_and_back_vec = mask_front_and_back_vec
+        if not no_vec:
+            node_in_dims = (self.node_s_in_dim, 3)
+        else:
+            node_in_dims = (self.node_s_in_dim, 1)
+        self.W_node = nn.Sequential(
+            Perceptron_(node_in_dims, node_hid_dims, scalar_act=None, vector_act=None),
+            SVLayerNorm(node_hid_dims),
+            Perceptron_(node_hid_dims, node_hid_dims, scalar_act=None, vector_act=None),
+        )
+
+        # Initial embedding of edge features
+        # edge_in_dims = (num_rbf+num_positional_embeddings, 1)
+        if not no_vec:
+            edge_in_dims = (self.edge_s_in_dim, len(self.input_feature_config.rel_dist_atom_pairs))
+        else:
+            edge_in_dims = (self.edge_s_in_dim, 1)
+        self.W_edge = nn.Sequential(
+            Perceptron_(edge_in_dims, edge_hid_dims, scalar_act=None, vector_act=None),
+            SVLayerNorm(edge_hid_dims),
+            Perceptron_(edge_hid_dims, edge_hid_dims, scalar_act=None, vector_act=None),
+        )
+
+        # Encoder
+        print(f'convolution type = {conv}'.upper())
+        self.encoder_layers = nn.ModuleList(
+            SVGraphConvLayer(
+                node_hid_dims, 
+                edge_hid_dims, 
+                mlp_mode=perceptron_mode, 
+                drop_rate=drop_rate,
+                conv=conv,
+            ) for _ in range(num_layers)
+        )
+
+        # Embed known amino acids
+        self.aa_embed = nn.Embedding(20, embedding_dim=aa_embed_dim) # Each of 20 AAs embedded in length-(aa_embed_dim) dense vectors
+        edge_dec_hid_dims = (edge_hid_dims[0]+aa_embed_dim, edge_hid_dims[1]) # Extends scalar portion by aa_embed_dim
+
+        # Decoder
+        self.decoder_layers = nn.ModuleList(
+            SVGraphConvLayer(
+                node_hid_dims, 
+                edge_dec_hid_dims, 
+                mlp_mode=perceptron_mode, 
+                drop_rate=drop_rate,
+                conv=conv,
+                autoregressive=True,
+            ) for _ in range(num_layers)
+        )
+
+        # Output layers: convert vector and scalar features to scalar only features
+        node_s_dim = node_hid_dims[0]
+        if self.use_svp_for_dense_and_offset:
+            self.W_out = nn.Sequential(
+                SVLayerNorm(node_hid_dims),
+                Perceptron_(node_hid_dims, node_hid_dims), # Keep vector information
+            )
+        else:
+            # TODO: Change from 1 unused vector output to actually 0 vector outputs
+            # (if DistributedDataParallel doesn't crash out when doing it)
+            self.W_out = nn.Sequential(
+                SVLayerNorm(node_hid_dims),
+                Perceptron_(node_hid_dims, (node_s_dim, 1)),
+            )
+        if self.predict_binned_chis:
+            if self.separate_dense_layers:
+                if self.use_svp_for_dense_and_offset:
+                    # TODO: Change from 1 unused vector output to actually 0 vector outputs
+                    # (if DistributedDataParallel doesn't crash out when doing it)
+                    self.denses = nn.ModuleList(
+                        nn.Sequential(
+                            Perceptron_(node_hid_dims, node_hid_dims, scalar_act='relu'),
+                            SVDropout(drop_rate=drop_rate),
+                            Perceptron_(node_hid_dims, (self.num_chi_bins, 1), scalar_act=None, vector_act=None),
+                        ) for _ in range(4)
+                    )
+                else:
+                    self.denses = nn.ModuleList(
+                        nn.Sequential(
+                            nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
+                            nn.Dropout(p=drop_rate),
+                            nn.Linear(node_s_dim, self.num_chi_bins),
+                        ) for _ in range(4)
+                    )
+            else:
+                # TODO: Refactor this branch to use SVPerceptron based on use_svp_for_dense_and_offset flag
+                self.dense = nn.Sequential(
+                    nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
+                    nn.Dropout(p=drop_rate),
+                    nn.Linear(node_s_dim, 4 * self.num_chi_bins), # All in the same dimension, later gets reshaped
+                )
+
+            if self.separate_offset_layers:
+                if self.use_svp_for_dense_and_offset:
+                    # TODO: Change from 1 unused vector output to actually 0 vector outputs
+                    # (if DistributedDataParallel doesn't crash out when doing it)
+                    self.offset_layers = nn.ModuleList(
+                        Perceptron_(node_hid_dims, (1, 1), scalar_act=None, vector_act=None) for _ in range(4)
+                    )
+                else:
+                    self.offset_layers = nn.ModuleList(
+                        nn.Linear(node_s_dim, 1) for _ in range(4)
+                    )
+            else:
+                # TODO: Refactor this branch to use SVPerceptron based on use_svp_for_dense_and_offset flag
+                self.offset_layer = nn.Linear(node_s_dim, 4) # Single offset per chi
+        else:
+            self.node_out_s_dim = node_out_s_dim
+            self.dense = nn.Sequential(
+                nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
+                nn.Dropout(p=drop_rate),
+                nn.Linear(node_s_dim, 4 * node_out_s_dim), # All in the same dimension, later gets reshaped
+            )
+
+        # Layers used for recycling previous predictions
+        self.recycle_chi_bin_probs = recycle_chi_bin_probs
+        self.recycle_chi_sincos = recycle_chi_sincos
+        self.recycle_sc_coords = recycle_sc_coords
+        if self.recycle_chi_bin_probs:
+            self.W_recycle_chi_bin_probs = nn.Linear(
+                4 * self.num_chi_bins, node_hid_dims[0])
+
+        # Used for generating final coordinates
+        self.idealizer = Idealizer(use_native_bb_coords=True)
+
+    @property
+    def metric_names(self) -> Sequence[str]:
+        metrics = [
+            "rotamer recovery",
+            "rmsd",
+        ]
+
+        if self.predict_binned_chis:
+            metrics.append(
+                "chi nll loss"
+            )
+            metrics.append(
+                "offset mse loss"
+            )
+
+        return metrics
+
+    def _get_arg_groups(self):
+        arg_groups_path = './models/pscp/configs/arg_groups.yaml'
+        with open(arg_groups_path, "r") as f:
+            arg_groups_dict = yaml.safe_load(f)
+        arg_groups = {k: SimpleNamespace(**v) for k, v in arg_groups_dict.items()}
+        return arg_groups
+    
+    def _get_model_input_representation(self, protein, seq_mask=None, dihedral_mask=None,):
+        protein, _ = impute_cb(protein, protein)
+        extra = _augment(protein, protein)
+        protein = set_canonical_coords_n_masks(protein)
+
+        return ModelInput(
+            decoy=protein,
+            input_features=self.feat_gen.generate_features(
+                protein,
+                extra=extra,
+                seq_mask=seq_mask,
+                dihedral_mask=dihedral_mask,
+            ),
+            extra=extra,
+        )
+    
+    def _encode_sc_dihedrals(self, chis):
+        num_sc_classes = self.arg_groups['feature_args'].sc_dihedral_encode_dim
+        mapped = torch.clamp((chis / (2 * PI)) + 0.5, 0, 1) * (num_sc_classes - 1)
+        as_indices = mapped.long()
+        one_hot = F.one_hot(as_indices, num_classes=num_sc_classes).float()
+        return one_hot
+
+    def _get_node_and_edge_scalars(self, batch, edge_index, device='cuda'):
+        batch_size = len(batch.ptr) - 1
+        node_s_per_protein, edge_s_per_protein = [], []
+        ptr = 0
+        for i in range(batch_size):
+            protein = batch.protein_model[i]
+            model_input_repr = self._get_model_input_representation(protein)
+            init_residue_feats, init_pair_feats = map(
+                lambda x : x.squeeze(0),
+                self.input_embedding(model_input_repr.input_features.to(device))
+            )
+            # print(f'init_residue_feats.shape = {init_residue_feats.shape}')
+            # print(f'init_pair_feats.shape = {init_pair_feats.shape}')
+
+            # Gets secondary structure features to concatenate onto initial node features
+            ss_feats = _get_ss_tensor(batch.secondary_structure[i], device=device)
+            # print(f'ss_feats.shape = {ss_feats.shape}')
+            init_residue_feats = torch.cat((init_residue_feats, ss_feats), dim=1)
+            # print(f'new init_residue_feats.shape = {init_residue_feats.shape}')
+
+            # Appends node features for individual protein
+            node_s_per_protein.append(init_residue_feats)
+
+            # Finishes computing edge features for individual protein
+            num_nodes_for_protein = batch.ptr[i+1] - batch.ptr[i]
+            num_edges_for_protein = num_nodes_for_protein * min(self.top_k, num_nodes_for_protein - 1)
+            edge_index_for_protein = edge_index[:, ptr:ptr+num_edges_for_protein] - batch.ptr[i]
+            ptr += num_edges_for_protein
+            selected_edge_feats = init_pair_feats[edge_index_for_protein[0], edge_index_for_protein[1], :]
+            edge_s_per_protein.append(selected_edge_feats)
+
+        # Combines the features from each individual protein into batch features
+        node_s = torch.cat(node_s_per_protein, dim=0)
+        edge_s = torch.cat(edge_s_per_protein, dim=0)
+        return node_s, edge_s
+    
+    def _get_node_vectors(self, batch, device='cuda'):
+        batch_size = len(batch.ptr) - 1
+        node_v_per_protein = []
+        for i in range(batch_size):
+            protein_start, protein_end = batch.ptr[i], batch.ptr[i+1]
+            orientations = _orientations(
+                pos_CA=batch.pos_CA[protein_start:protein_end],
+                resseq=batch.resseq[i],
+                mask_out_noncontiguous_residues=self.mask_front_and_back_vec,
+                device=device)
+            imputed_sidechain_vectors = _impute_sidechain_vectors(
+                pos_N=batch.pos_N[protein_start:protein_end],
+                pos_CA=batch.pos_CA[protein_start:protein_end],
+                pos_C=batch.pos_C[protein_start:protein_end],)
+            concatenated = torch.cat([orientations, imputed_sidechain_vectors.unsqueeze(-2)], dim=-2)
+            node_v_per_protein.append(concatenated)
+        node_v = torch.cat(node_v_per_protein, dim=0)
+        return node_v
+
+    def _impute_cb_batch(self, batch):
+        return torch.cat(
+            [impute_cb(protein, protein)[0].get_atom_coords('CB') for protein in batch.protein_model],
+            dim=0
+        )
+
+    def _get_inputs(self, batch):
+        device = self.dummy.device
+
+        # Gets scalar features for nodes and edges
+        assert batch.batch is not None
+        edge_index = torch_cluster.knn_graph(batch.pos_CA,
+                                             k=self.top_k,
+                                             batch=batch.batch,
+                                             flow='target_to_source')
+        node_s, edge_s = self._get_node_and_edge_scalars(batch, edge_index, device=device)
+
+        # Gets vector features for nodes and edges
+        if not self.no_vec:
+            # node_v = batch.node_v
+            node_v = self._get_node_vectors(batch, device=device)
+            pos_CB = batch.imputed_pos_CB if batch.imputed_pos_CB is not None else self._impute_cb_batch(batch).to(device)
+            atom_type_to_pos = {
+                'N': batch.pos_N,
+                'CA': batch.pos_CA,
+                'C': batch.pos_C,
+                'O': batch.pos_O,
+                'CB': pos_CB,
+            }
+            E_vectors = []
+            for pair in self.input_feature_config.rel_dist_atom_pairs:
+                E_vectors.append(
+                    atom_type_to_pos[pair[1]][edge_index[0]] - atom_type_to_pos[pair[0]][edge_index[1]]
+                )
+            edge_v = torch.cat(
+                list(map(lambda vectors: _normalize(vectors).unsqueeze_(-2), E_vectors)),
+                dim=-2
+            )
+        else:
+            # TODO: Change from 1 all-zero vector feature to actually 0 vector features
+            node_v = torch.zeros((len(batch.pos_CA), 1, 3), device=self.dummy.device)
+            edge_v = torch.zeros((len(edge_index[0]), 1, 3), device=self.dummy.device)
+
+        # Constructs ScalarVector objects for features
+        node_in = ScalarVector(s=node_s, v=node_v)
+        edge_in = ScalarVector(s=edge_s, v=edge_v)
+
+        # Get rotation matrices
+        R_node = construct_3d_basis(batch.pos_CA, batch.pos_C, batch.pos_N)    # (N, 3, 3)
+        R_node = R_node.nan_to_num()
+        R_edge = R_node[edge_index[0]]  # (E, 3, 3)
+        return edge_index, node_in, edge_in, R_node, R_edge
+
+    def forward(self, batch, recycling_iters=0):
+        # Initializes previous outputs to all zeros
+        prev_output = {
+            'chi_bin_logits': torch.zeros((batch.pos_CA.shape[0], 4, self.num_chi_bins),
+                                          device=self.dummy.device),
+            'chi_bin_probs': torch.zeros((batch.pos_CA.shape[0], 4, self.num_chi_bins),
+                                         device=self.dummy.device),
+            'chi_bin_log_probs': torch.zeros((batch.pos_CA.shape[0], 4, self.num_chi_bins),
+                                             device=self.dummy.device),
+            'chi_offsets': torch.zeros_like(batch.chis),
+        }
+
+        # Runs recycling steps
+        with torch.no_grad():
+            for it in range(recycling_iters):
+                output = self.single_forward_pass(batch, prev_output)
+                prev_output = output
+        # for it in range(recycling_iters):
+        #     output = self.single_forward_pass(batch, prev_output)
+        #     prev_output = output
+
+        # Runs final forward pass
+        output = self.single_forward_pass(batch, prev_output)
+        return output
+
+    def single_forward_pass(self, batch, prev_output):
+        edge_index, node_in, edge_in, R_node, R_edge = self._get_inputs(batch)
+
+        h_node = rotate_apply(self.W_node, node_in, R_node)
+        h_edge = rotate_apply(self.W_edge, edge_in, R_edge)
+
+        # Incorporates previous predictions into hidden node representations
+        if self.recycle_chi_bin_probs:
+            h_node = h_node + ScalarVector(
+                self.W_recycle_chi_bin_probs(prev_output["chi_bin_probs"].view(
+                    batch.chis.shape[0], -1
+                )),
+                0  # Broadcasts to correct shape
+            )
+
+        skip_inputs = []
+        for layer in self.encoder_layers:
+            skip_inputs.append(h_node)
+            h_node = layer(h_node, edge_index, h_edge, rot=R_node)     
+
+        # These are just the node features after the encoder layers, so then
+        # even though h_node gets updated between the decoder layers, the values
+        # at this point get repeatedly get fed to each decoder layer
+        encoder_embeddings = h_node
+
+        edge_index_i, edge_index_j = edge_index
+
+        h_seq = self.aa_embed(batch.seq)    # (N, aa_embed_dim)
+        h_seq = h_seq[edge_index_j]        # Amino acid embedding of j-nodes.
+        if not self.aa_embeds_on_back_edges:
+            h_seq[edge_index_j >= edge_index_i] = 0
+        h_edge_autoregressive = ScalarVector(
+            s = torch.cat([h_edge.s, h_seq], dim=-1),
+            v = h_edge.v,
+        )
+
+        for layer in self.decoder_layers:
+            if self.unet:
+                autoregressive_x = skip_inputs.pop()
+            else:
+                autoregressive_x = encoder_embeddings
+
+            h_node = layer(h_node,
+                           edge_index,
+                           h_edge_autoregressive,
+                           autoregressive_x=autoregressive_x,
+                           rot=R_node)
+
+        output = {}
+        if self.use_svp_for_dense_and_offset:
+            out = rotate_apply(self.W_out, h_node, R_node)
+        else:
+            out = rotate_apply(self.W_out, h_node, R_node).s  # (N, node_hid_s)
+        n = batch.pos_CA.shape[0]
+        if self.predict_binned_chis:
+            # Gets bin probs
+            if self.separate_dense_layers:
+                if self.use_svp_for_dense_and_offset:
+                    separate_chi_logits = [dense(out).s for dense in self.denses] # Each one is (N, 72)
+                else:
+                    separate_chi_logits = [dense(out) for dense in self.denses] # Each one is (N, 72)
+                chi_bin_logits = torch.stack(separate_chi_logits, dim=1)
+            else:
+                # TODO: Refactor to use use_svp_for_dense_and_offset flag
+                chi_bin_logits = self.dense(out).reshape(n, 4, self.num_chi_bins) # (N, 4, 72)
+            chi_bin_probs = F.softmax(chi_bin_logits, dim=-1)
+            chi_bin_log_probs = F.log_softmax(chi_bin_logits, dim=-1)
+
+            # Gets offsets from middle of bins
+            bin_width = 2 * math.pi / self.num_chi_bins
+            if self.separate_offset_layers:
+                if self.use_svp_for_dense_and_offset:
+                    separate_offsets = [
+                        (bin_width * (torch.sigmoid(offset_layer(out).s) - 0.5))
+                        for offset_layer in self.offset_layers
+                    ]
+                else:
+                    separate_offsets = [
+                        (bin_width * (torch.sigmoid(offset_layer(out)) - 0.5))
+                        for offset_layer in self.offset_layers
+                    ]
+                offset = torch.stack(separate_offsets, dim=1)
+            else:
+                # TODO: Refactor to use use_svp_for_dense_and_offset flag
+                offset = (bin_width * (torch.sigmoid(self.offset_layer(out)) - 0.5)) \
+                    .reshape(n, 4, 1) # (N, 4, 1)
+
+            output['chi_bin_logits'] = chi_bin_logits
+            output['chi_bin_probs'] = chi_bin_probs
+            output['chi_bin_log_probs'] = chi_bin_log_probs
+            output['chi_offsets'] = offset
+
+            chis = self._get_chi_predictions(output, strategy="mode").squeeze(-1)
+            gumbel_sampled_chis = self \
+                ._get_chi_predictions(output, strategy="gumbel_sample") \
+                .squeeze(-1)
+            output['chis'] = chis
+            output['gumbel_sampled_chis'] = gumbel_sampled_chis
+        else:
+            trig_dihedrals = self.dense(out).reshape(n, 4, self.node_out_s_dim)   # (N, 4, 2)
+            output['trig_dihedrals'] = trig_dihedrals
+
+        return output
+    
+    def sample_pdb(
+        self,
+        batch,
+        input_path,
+        output_path,
+        n_samples=1
+    ):
+        # Obtains predictions
+        assert batch.num_graphs == 1
+        n = len(batch.seq)
+        if self.predict_binned_chis:
+            output = self.forward(batch.to(self.dummy.device))
+            chis = output['chis']
+        else:
+            # TODO: Adapt this whole else branch to work with all 4 chis instead of 1
+
+            trig_dihedrals = self.forward(batch.to(self.dummy.device))["trig_dihedrals"]
+            pred_chis_sin_cos = trig_dihedrals
+
+            # Effectively concatenates the predicted chis with the native chis,
+            # since the predicted chis are only for one chi per residue
+            chis_sin_cos = torch.zeros((n, 4, 2), device=self.dummy.device)
+            chis_sin_cos[torch.arange(n), self.chi_num-1, :] += pred_chis_sin_cos
+            native_mask = torch.ones((n, 4, 2), dtype=torch.bool, device=self.dummy.device)
+            native_mask[torch.arange(n), self.chi_num-1, :] = False
+            chis_sin_cos = chis_sin_cos + native_mask * batch.chis_sin_cos
+
+            # Gets actual angles
+            from_sin_cos = lambda x: torch.atan2(*x.unbind(-1))
+            chis = from_sin_cos(chis_sin_cos) # (N, 4)
+
+        # Computes FlowPacker features and removes unknown amino acid residues
+        flowpacker_features = _remove_unknown_flowpacker_residues(get_features(input_path))
+        aa_num = flowpacker_features['aa_num']
+        atom_mask = torch.Tensor(flowpacker_features['atom14_mask']).to(self.dummy.device)
+        bb_coords = torch.cat([batch.pos_N.unsqueeze(1),
+                               batch.pos_CA.unsqueeze(1),
+                               batch.pos_C.unsqueeze(1),
+                               batch.pos_O.unsqueeze(1)], dim=1)
+        
+        # Calculates and saves the atom coordinates
+        all_atom_coords = self.idealizer(aa_num, bb_coords, chis) * atom_mask.unsqueeze(-1)
+        aa_str = flowpacker_features['aa_str']
+        create_structure_from_crds(aa_str, all_atom_coords, atom_mask, outPath=output_path, save_traj=False)
+
+    def _bin_and_offset_chis(self, chi_angles):
+        tol = 1e-5
+        assert torch.all(chi_angles >= -math.pi - tol) and torch.all(chi_angles <= math.pi + tol), \
+            "All chi angles must be in [-π, π]"
+
+        # Calculates bin indices
+        bin_width = 2 * math.pi / self.num_chi_bins
+        chi_normalized = torch.remainder(chi_angles + math.pi, 2 * math.pi)
+        bin_idx = torch.floor(chi_normalized / bin_width).long().clamp(max=self.num_chi_bins-1)
+        chi_one_hot = F.one_hot(bin_idx, num_classes=self.num_chi_bins)
+
+        # Calculates offsets
+        bin_center = -math.pi + (bin_idx.float() + 0.5) * bin_width
+        chi_offset = (chi_normalized - math.pi) - bin_center
+
+        # Assert offset is within [-bin_width/2, bin_width/2]
+        assert torch.all(chi_offset >= (-bin_width / 2) - tol) and \
+            torch.all(chi_offset <= (bin_width / 2) + tol), \
+            (
+                "Chi offsets should lie within [-bin_width/2, bin_width/2], "
+                f"but offset was (max={torch.max(chi_offset)}, min={torch.min(chi_offset)}) "
+                f"while bin_width/2 is {bin_width/2.0}"
+            )
+
+        return bin_idx, chi_one_hot, chi_offset
+    
+    def _get_chi_predictions(self, output, strategy="gumbel_sample", gumbel_tau=1.0): 
+        """Adapted from https://github.com/Kuhlman-Lab/PIPPack"""
+
+        # Extracts outputs
+        chi_bin_logits = output['chi_bin_logits']
+        chi_bin_probs = output['chi_bin_probs']
+        chi_bin_offsets = output['chi_offsets']
+
+        # Gets predicted chi bin centers
+        bin_width = 2 * math.pi / self.num_chi_bins
+        if strategy in ("mode", "multinomial_sample"):
+            if strategy == "mode":
+                chi_bin = torch.argmax(chi_bin_probs, dim=-1)
+            else:
+                # TODO: Adapt this for predicting all chis instead of 1 (if needed?)
+                chi_bin = torch.multinomial(
+                    chi_bin_probs.view(-1, chi_bin_probs.shape[-1]), num_samples=1
+                ).squeeze(-1).view(*chi_bin_probs.shape[:-1])
+            pred_bin_center = (-math.pi + ((chi_bin.float() + 0.5) * bin_width)).unsqueeze(-1)
+        elif strategy == "gumbel_sample":
+            bin_centers = ((torch.arange(self.num_chi_bins, device=self.dummy.device) + 0.5) * 
+                           bin_width) - math.pi
+            chi_bin_onehot = F.gumbel_softmax(chi_bin_logits, gumbel_tau, hard=True)
+            pred_bin_center = torch.sum(
+                bin_centers \
+                    .reshape(1, 1, self.num_chi_bins) \
+                    .expand(chi_bin_onehot.shape[0], 4, self.num_chi_bins) \
+                    * chi_bin_onehot,
+                dim=-1,
+                keepdim=True
+            )
+        else:
+            raise NotImplementedError("Choose an existing logit decoding method "
+                                      "(mode, multinomial_sample, or gumbel_sample)")
+
+        # Determines actual chi value from bin (doesn't need onehot) and offset
+        sampled_chi = pred_bin_center + chi_bin_offsets
+        return sampled_chi
+
+    def _get_representative_bb_plddt(
+        self,
+        batch,
+        method='avg',
+        sharpness=10.0,
+        shift=0.7,
+        threshold=0.9,
+    ):
+        if method == 'assume_native':
+            return torch.ones(batch.pos_CA.shape[0],
+                            dtype=batch.pos_CA.dtype,
+                            device=batch.pos_CA.device)
+
+        # Compute average backbone pLDDT
+        bb_mask = batch.atom14_mask[:, :4]
+        masked_sum = ((batch.bb_plddt / 100.0) * bb_mask).sum(dim=-1)
+        mask_sum = bb_mask.sum(dim=-1).clamp(min=1e-6)
+        avg_bb_plddt = masked_sum / mask_sum
+
+        if method == 'avg':
+            return avg_bb_plddt
+
+        elif method == 'square':
+            return torch.square(avg_bb_plddt)
+
+        elif method == 'sigmoid':
+            return torch.sigmoid(sharpness * (avg_bb_plddt - shift))
+
+        elif method == 'threshold':
+            result = (avg_bb_plddt >= threshold).float()
+            return result
+        
+        else:
+            raise NotImplementedError(f'Method {method} not implemented')
+    
+    def compute_loss(
+            self,
+            output,
+            batch,
+            _return_breakdown=False,
+            _logger=BlackHole(),
+            _log_prefix="train",
+            loss_weights: Optional[Dict[str, Union[float, bool]]] = {
+                "rmsd_loss_weight": 1.0,
+                "rotamer_recovery_weight": 1.0,
+                "chi_nll_loss_weight": 1.0,
+                "offset_mse_loss_weight": 1.0,
+                "chi_trig_huber_loss_weight": 1.0,
+                "clash_loss_weight": 1.0,
+                "proline_loss_weight": 1.0,
+            }):
+        """Adapted from https://github.com/Kuhlman-Lab/PIPPack"""
+
+        # Masks
+        chi_mask = batch.chi_mask
+        batch.residue_mask = torch.ones((batch.pos_CA.shape[0]), device=self.dummy.device)
+
+        # Formatting output
+        mode_chis = output["chis"]
+        gumbel_sampled_chis = output["gumbel_sampled_chis"]
+        bb_coords = torch.cat([batch.pos_N.unsqueeze(1),
+                               batch.pos_CA.unsqueeze(1),
+                               batch.pos_C.unsqueeze(1),
+                               batch.pos_O.unsqueeze(1)], dim=1)
+        output_coords = self.idealizer(batch.seq, bb_coords, gumbel_sampled_chis) * batch.atom14_mask.unsqueeze(-1)
+
+        avg_bb_plddt = self._get_representative_bb_plddt(batch, method='sigmoid', sharpness=40, shift=0.9)
+        
+        loss_fns = {
+            # Chi angle-based
+            "rotamer_recovery": lambda: rotamer_recovery_from_coords(
+                batch.seq, batch.chis, mode_chis, 
+                batch.residue_mask, chi_mask, # chi_num=None,
+                _metric=_logger.get_metric(_log_prefix + " rotamer recovery")),
+
+            # Coordinate-based (using coords from Gumbel-sampled chis)
+            "rmsd_loss": lambda: sc_rmsd(
+                output_coords, batch.atom14_coords, batch.seq, 
+                batch.atom14_mask, batch.residue_mask,
+                avg_bb_plddt=avg_bb_plddt,
+                use_sqrt=False,
+                _metric=_logger.get_metric(_log_prefix + " rmsd")),
+            "clash_loss": lambda: local_interresidue_sc_clash_loss(
+                batch, output_coords, 0.6)["mean_loss"],
+            "proline_loss": lambda: unclosed_proline_loss(
+                batch, output_coords)
+        }
+        
+        if self.predict_binned_chis:
+            # Retrieves outputs and labels
+            true_bins, _, true_offsets = self._bin_and_offset_chis(batch.chis)
+            chi_bin_log_probs = output["chi_bin_log_probs"]
+            chi_offsets = output["chi_offsets"].squeeze(-1)
+            
+            # Updates loss functions
+            loss_fns.update({
+                "chi_nll_loss": lambda: nll_chi_loss(
+                    chi_bin_log_probs, true_bins,
+                    batch.seq, chi_mask.float(),
+                    avg_bb_plddt=avg_bb_plddt,
+                    _metric=_logger.get_metric(_log_prefix + " chi nll loss"))})
+            loss_fns.update({
+                "offset_mse_loss": lambda: offset_mse(
+                    chi_offsets, true_offsets,
+                    chi_mask.float(), self.num_chi_bins, False,
+                    avg_bb_plddt=avg_bb_plddt,
+                    _metric=_logger.get_metric(_log_prefix + " offset mse loss"))})
+        else:
+            # TODO: Adapt this whole else branch to work with predicting all chis
+            # instead of only one chi
+            loss_fns.update({
+                "chi_trig_huber_loss": lambda: huber_loss(
+                    embedded_chis, batch.chis, batch.chi_mask, chi_num_mask
+                )[0]
+            })
+            
+        total_loss = 0.
+        losses = {}
+        for loss_name, loss_fn in loss_fns.items():
+            weight = loss_weights.get(loss_name + "_weight", 0.0)
+            if weight == 0.0:
+                continue
+            loss = loss_fn()
+            if (torch.isnan(loss) or torch.isinf(loss)):
+                print(f"{loss_name} loss is NaN. Skipping...")
+                loss = loss.new_tensor(0., requires_grad=True)
+            total_loss = total_loss + weight * loss
+            losses[loss_name] = loss.detach().cpu().clone()
+        losses["overall"] = total_loss.detach().cpu().clone()
+        
+        if not _return_breakdown:
+            return total_loss
+        
+        return total_loss, losses
+
+
+class PSCPSingleChiNetwork(PSCPAllChisNetwork):
+    def __init__(
+            self, 
+            node_hid_dims=(128, 32), edge_hid_dims=(64, 16),
+            num_layers=3, drop_rate=0.1, top_k=30, aa_embed_dim=20,
+            num_rbf=16, num_positional_embeddings=16,
+            node_out_s_dim=2,
+            predict_binned_chis=True, num_chi_bins=72,
+            perceptron_mode='svp', conv='gnn', no_vec=False,
+            recycle_chi_bin_probs=False, recycle_chi_sincos=False, recycle_sc_coords=False,
+            mask_front_and_back_vec=False, unet=False, aa_embeds_on_back_edges=False,
+            use_svp_for_dense_and_offset=False,
+            chi_num=1
+    ):
+        super().__init__(
+            node_hid_dims=node_hid_dims, edge_hid_dims=edge_hid_dims,
+            num_layers=num_layers, drop_rate=drop_rate, top_k=top_k, aa_embed_dim=aa_embed_dim,
+            num_rbf=num_rbf, num_positional_embeddings=num_positional_embeddings,
+            node_out_s_dim=node_out_s_dim,
+            predict_binned_chis=predict_binned_chis, num_chi_bins=num_chi_bins,
+            perceptron_mode=perceptron_mode, conv=conv, no_vec=no_vec,
+            separate_dense_layers=False, separate_offset_layers=False,
+            recycle_chi_bin_probs=recycle_chi_bin_probs, recycle_chi_sincos=recycle_chi_sincos, recycle_sc_coords=recycle_sc_coords,
+            mask_front_and_back_vec=mask_front_and_back_vec, unet=unet, aa_embeds_on_back_edges=aa_embeds_on_back_edges,
+            use_svp_for_dense_and_offset=use_svp_for_dense_and_offset
+        )
+
+        assert chi_num in (1, 2, 3, 4), f"chi_num must be in (1,2,3,4), got {chi_num}"
+        self.chi_num = chi_num
+        # Add extra input dims for previous chis if chi_num > 1
+        self.node_s_in_dim += (self.arg_groups['feature_args'].sc_dihedral_encode_dim) * (chi_num - 1)
+
+        # Initial embedding of node features
+        Perceptron_ = functools.partial(VectorPerceptron, mode=perceptron_mode)
+        self.mask_front_and_back_vec = mask_front_and_back_vec
+        if not no_vec:
+            node_in_dims = (self.node_s_in_dim, 3)
+        else:
+            node_in_dims = (self.node_s_in_dim, 0)
+        self.W_node = nn.Sequential(
+            Perceptron_(node_in_dims, node_hid_dims, scalar_act=None, vector_act=None),
+            SVLayerNorm(node_hid_dims),
+            Perceptron_(node_hid_dims, node_hid_dims, scalar_act=None, vector_act=None),
+        )
+
+        # Only a single dense and offset_layer
+        node_s_dim = node_hid_dims[0]
+        if self.predict_binned_chis:
+            self.dense = nn.Sequential(
+                nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
+                nn.Dropout(p=drop_rate),
+                nn.Linear(node_s_dim, self.num_chi_bins),
+            )
+            self.offset_layer = nn.Linear(node_s_dim, 1)
+        else:
+            self.node_out_s_dim = node_out_s_dim
+            self.dense = nn.Sequential(
+                nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
+                nn.Dropout(p=drop_rate),
+                nn.Linear(node_s_dim, node_out_s_dim),
+            )
+
+        # Output layers: convert vector and scalar features to scalar only features
+        node_s_dim = node_hid_dims[0]
+        if self.predict_binned_chis:
+            if self.use_svp_for_dense_and_offset:
+                # TODO: Change from 1 unused vector output to actually 0 vector outputs
+                # (if DistributedDataParallel doesn't crash out when doing it)
+                self.dense = nn.Sequential(
+                    Perceptron_(node_hid_dims, node_hid_dims, scalar_act='relu'),
+                    SVDropout(drop_rate=drop_rate),
+                    Perceptron_(node_hid_dims, (self.num_chi_bins, 1), scalar_act=None, vector_act=None),
+                )
+            else:
+                self.dense = nn.Sequential(
+                    nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
+                    nn.Dropout(p=drop_rate),
+                    nn.Linear(node_s_dim, self.num_chi_bins),
+                )
+
+            if self.use_svp_for_dense_and_offset:
+                # TODO: Change from 1 unused vector output to actually 0 vector outputs
+                # (if DistributedDataParallel doesn't crash out when doing it)
+                self.offset_layer = Perceptron_(node_hid_dims, (1, 1), scalar_act=None, vector_act=None)
+            else:
+                self.offset_layer = nn.Linear(node_s_dim, 1)
+        else:
+            self.node_out_s_dim = node_out_s_dim
+            self.dense = nn.Sequential(
+                nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
+                nn.Dropout(p=drop_rate),
+                nn.Linear(node_s_dim, node_out_s_dim),
+            )
+
+        # Layers used for recycling previous predictions
+        self.recycle_chi_bin_probs = recycle_chi_bin_probs
+        self.recycle_chi_sincos = recycle_chi_sincos
+        self.recycle_sc_coords = recycle_sc_coords
+        if self.recycle_chi_bin_probs:
+            self.W_recycle_chi_bin_probs = nn.Linear(self.num_chi_bins, node_hid_dims[0])
+
+    def _get_node_and_edge_scalars(self, batch, edge_index, device='cuda'):
+        batch_size = len(batch.ptr) - 1
+        node_s_per_protein, edge_s_per_protein = [], []
+        ptr = 0
+        for i in range(batch_size):
+            protein = batch.protein_model[i]
+            model_input_repr = self._get_model_input_representation(protein)
+            init_residue_feats, init_pair_feats = map(
+                lambda x : x.squeeze(0),
+                self.input_embedding(model_input_repr.input_features.to(device))
+            )
+
+            # Gets secondary structure features to concatenate onto initial node features
+            ss_feats = _get_ss_tensor(batch.secondary_structure[i], device=device)
+            init_residue_feats = torch.cat((init_residue_feats, ss_feats), dim=1)
+
+            # Finishes computing autoregressive node features for individual protein
+            if self.chi_num > 1:
+                chis_sin_cos_for_protein = batch.chis_sin_cos[batch.ptr[i]:batch.ptr[i+1]]
+                chis_for_protein = torch.atan2(*chis_sin_cos_for_protein.unbind(-1))
+
+                # Only gets the previous angles
+                chis_sin_cos_for_protein, chis_for_protein = map(
+                    lambda x : x[:, :self.chi_num-1],
+                    (chis_sin_cos_for_protein, chis_for_protein)
+                )
+
+                # _histogram(chis_sin_cos_for_protein[..., 0], 'sin.png')
+                # _histogram(chis_sin_cos_for_protein[..., 1], 'cos.png')
+                # _histogram(chis_for_protein, 'theta.png')
+
+                # Encodes the actual chi angles
+                encoded_chis = self._encode_sc_dihedrals(chis_for_protein)
+                # encoded_chis = chis_for_protein.unsqueeze(-1)
+
+                # Concatenates sin(theta), cos(theta), and encoded theta
+                sc_dihedrals = rearrange(encoded_chis, 'n d a -> n (d a)')
+
+                init_residue_feats = torch.cat((init_residue_feats, sc_dihedrals), dim=1)
+
+            # Appends node features for individual protein
+            node_s_per_protein.append(init_residue_feats)
+
+            # Finishes computing edge features for individual protein
+            num_nodes_for_protein = batch.ptr[i+1] - batch.ptr[i]
+            num_edges_for_protein = num_nodes_for_protein * min(self.top_k, num_nodes_for_protein - 1)
+            edge_index_for_protein = edge_index[:, ptr:ptr+num_edges_for_protein] - batch.ptr[i]
+            ptr += num_edges_for_protein
+            selected_edge_feats = init_pair_feats[edge_index_for_protein[0], edge_index_for_protein[1], :]
+            edge_s_per_protein.append(selected_edge_feats)
+
+        # Combines the features from each individual protein into batch features
+        node_s = torch.cat(node_s_per_protein, dim=0)
+        edge_s = torch.cat(edge_s_per_protein, dim=0)
+        return node_s, edge_s
+
+    def embed_predicted_chis(self, pred_chis: torch.Tensor, native_chis: torch.Tensor, chi_num: int) -> torch.Tensor:
+        assert pred_chis.shape[0] == native_chis.shape[0], "Invalid shape for pred_chis"
+        assert native_chis.shape[1] == 4, "native_chis must have shape (N, 4)"
+        assert 1 <= chi_num <= 4, "chi_num must be in [1, 4]"
+
+        N = pred_chis.shape[0]
+        device = pred_chis.device
+
+        # Initialize (N, 4) tensor with zeros
+        embedded_pred_chis = torch.zeros(tuple(native_chis.shape), device=device)
+        if len(native_chis.shape) <= 2:
+            embedded_pred_chis[torch.arange(N), chi_num - 1] = pred_chis.squeeze(-1)
+        else:
+            embedded_pred_chis[torch.arange(N), chi_num - 1, ...] = pred_chis.squeeze(-1)
+
+        # Create mask to keep native chis in the other positions
+        native_mask = torch.ones(tuple(native_chis.shape), dtype=torch.bool, device=device)
+        if len(native_chis.shape) <= 2:
+            native_mask[torch.arange(N), chi_num - 1] = False
+        else:
+            native_mask[torch.arange(N), chi_num - 1, ...] = False
+
+        # Combine predicted and native chis
+        chis = embedded_pred_chis + native_mask * native_chis
+        return chis
+
+    # TODO: Override forward(), single_forward_pass(), sample_pdb(), compute_loss()
+
+
+class PSCPAllChisAutoregressiveNetwork(nn.Module):
+    # TODO: Everything
+    pass
+
+        
+if __name__ == '__main__':
+    from .datasets import PSCPDataset
+    from modules.geometric import orthogonalize_matrix, apply_rotation, apply_inverse_rotation, compose_rotation
+
+    data_dir = './casp16_af3_predictions'
+    # split = 'train'
+    dataset = PSCPDataset(root=data_dir)
+    print(f'number of chains in dataset: {len(dataset)}')
+    for name, model in [
+        ('PSCPSingleChiNetwork', PSCPSingleChiNetwork().to('cuda')),
+        ('PSCPAllChisNetwork', PSCPAllChisNetwork().to('cuda'))
+    ]:
+        if name == 'PSCPSingleChiNetwork':
+            continue
+        print(f'######## For the {name}:')
+
+
+        batch = Batch.from_data_list([dataset[0], dataset[1], dataset[2], dataset[3]]).to('cuda')
+
+        rot_glob = orthogonalize_matrix(torch.randn([1, 3, 3])).to('cuda')
+        batch_rot = batch.clone()
+        batch_rot.pos_CA = apply_rotation(rot_glob, batch.pos_CA)
+        batch_rot.pos_C = apply_rotation(rot_glob, batch.pos_C)
+        batch_rot.pos_N = apply_rotation(rot_glob, batch.pos_N)
+        batch_rot.pos_O = apply_rotation(rot_glob, batch.pos_O)
+        batch_rot.node_v = apply_rotation(rot_glob, batch.node_v)
+
+        model.eval()
+        y_ref = model(batch)['chi_bin_logits']
+        print(f'y_ref.head() = {y_ref[:5]}')
+        print(f'y_ref.shape = {y_ref.shape}')
+
+        model.eval()
+        y_rot = model(batch_rot)['chi_bin_logits']
+        print(f'y_rot.head() = {y_rot[:5]}')
+        print(f'y_rot.shape = {y_rot.shape}')
+
+        with open(f'{name}_invariance_diffs.json', 'w') as f:
+            a = list(torch.flatten((y_ref - y_rot).abs()))
+            a = {'diffs': [float(ai) for ai in a]}
+            json.dump(a, f)
+        atol, rtol = 1e-5, 1e-4
+        if torch.allclose(y_ref, y_rot, atol=atol, rtol=rtol):
+            print('[Model] Passed invariance test.')
+        else:
+            print(
+                '[Model] Failed invariance test: '
+                f'{(y_ref - y_rot).abs().max().item()} exceeded abs. tol. {atol} or rel. tol. {rtol}'
+            )
+
+        # model.eval()
+        # sampled = model.sample(batch, n_samples=4)
+        # print(f"sampled = {sampled}")
+        # print(f"sampled.shape = {sampled.shape}")
+
+        output_dir = '.'
+        batch = Batch.from_data_list([dataset[2]]).to('cuda')
+        model.eval()
+        input_path = os.path.join(data_dir, f'{batch.name[0]}.pdb')
+        output_path = os.path.join(output_dir, f'{batch.name[0]}_testing_sampling_{name}.pdb')
+        os.makedirs(output_dir, exist_ok=True)
+        model.sample_pdb(batch, input_path, output_path)
+
+        import time
+        formatted_time = time.strftime("%Y-%m-%d_%H:%M:%S", time.localtime())
+        log_file = os.path.join(os.getcwd(), f"{formatted_time}_train_log.csv")
+        metrics = [mode + " " + metric for metric in model.metric_names for mode in ["train", "val"]]
+        # metric_logger = MetricLogger(log_file, metrics).to(model.dummy.device)
+        output = model(batch)
+        # print(f"batch.seq_fasta = {batch.seq_fasta}")
+        # print(f'batch.seq = {batch.seq}')
+        total_loss, losses = model.compute_loss(
+            output, batch, _return_breakdown=True,
+            # _logger=metric_logger, _log_prefix='val'
+        )
+        print(f'total_loss = {total_loss}')
+        print(f'losses = {losses}')
