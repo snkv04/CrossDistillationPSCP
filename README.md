@@ -1,0 +1,9 @@
+# Leveraging orientation-aware graph neural networks for protein side-chain prediction
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.16937575.svg)](https://doi.org/10.5281/zenodo.16937575)
+
+This repository contains the code associated with the paper "On overcoming PDB data scarcity with AlphaFoldDB for protein side-chain packing" by Sriniketh Vangaru and Debswapna Bhattacharya. ([PDF](./CrossDistillationForPSCPPaper.pdf))
+
+### Abstract:
+
+"Protein side-chain packing (PSCP) is the problem of predicting the coordinates of side-chain atoms given fixed backbone coordinates, and it is useful across various tasks in the field of structural biological modeling. While traditional PSCP methods are primarily trained on experimentally-determined structures from the Protein Data Bank (PDB), AlphaFold—a paradigm-shifting, machine learning-based, protein structure prediction tool released by DeepMind—has made available AlphaFoldDB, a database of high-quality synthetic protein structures which massively expands the structural coverage space from the PDB by multiple orders of magnitude. Herein, we aimed to determine whether PSCP methods could benefit from substituting their training data with AlphaFoldDB structures. Using a recent protein encoder named the orientation-aware graph neural network as our testing framework, we find that the high-confidence predicted protein structures from AlphaFoldDB are not suitable direct replacements for native chains in side-chain modeling, with such a replacement causing significant degradations in performance across various evaluation metrics. We also explore an approach of cross-distilling knowledge from AlphaFold's network by using both datasets simultaneously for our model to learn, which displays better results than using either dataset individually, regardless of the backbone type supplied during inference."
