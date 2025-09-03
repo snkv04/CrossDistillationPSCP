@@ -74,7 +74,7 @@ def _orientations(pos_CA, resseq=None, mask_out_noncontiguous_residues=False, de
 # TODO: Either use this or AttnPacker's implementation; no need to duplicate the same functionality
 # across functions
 def _impute_cb_vectors(pos_N, pos_CA, pos_C):
-    X = torch.cat([pos_N.view(-1, 1, 3), pos_CA.view(-1, 1, 3), pos_C.view(-1, 1, 3)], dim=1)   # (N, 3, 3)
+    X = torch.cat([pos_N.view(-1, 1, 3), pos_CA.view(-1, 1, 3), pos_C.view(-1, 1, 3)], dim=1)  # (N, 3, 3)
     n, origin, c = X[:, 0], X[:, 1], X[:, 2]
     c, n = _normalize(c - origin), _normalize(n - origin)
     bisector = _normalize(c + n)
@@ -85,9 +85,9 @@ def _impute_cb_vectors(pos_N, pos_CA, pos_C):
 
 def _get_ss_tensor(ss_str, device):
     to_indices = {
-        'C': 0, # loop / coil
-        'H': 1, # alpha helix
-        'E': 2, # beta sheet
+        'C': 0,  # loop / coil
+        'H': 1,  # alpha helix
+        'E': 2,  # beta sheet
     }
     as_indices = torch.Tensor([to_indices[c] for c in ss_str]).long().to(device)
     one_hot = F.one_hot(as_indices, num_classes=len(to_indices)).float()
@@ -140,8 +140,8 @@ class PSCPAllChisNetwork(nn.Module):
 
         # For input embedding
         self.input_embedding = InputEmbedding(self.input_feature_config)
-        self.node_s_in_dim, self.edge_s_in_dim = self.input_embedding.dims # 115, 205
-        self.node_s_in_dim += 3 # for secondary structure encodings
+        self.node_s_in_dim, self.edge_s_in_dim = self.input_embedding.dims  # 115, 205
+        self.node_s_in_dim += 3  # for secondary structure encodings
         # ===========================================================
 
         Perceptron_ = functools.partial(VectorPerceptron, mode=perceptron_mode)
@@ -181,8 +181,8 @@ class PSCPAllChisNetwork(nn.Module):
         )
 
         # Embed known amino acids
-        self.aa_embed = nn.Embedding(20, embedding_dim=aa_embed_dim) # Each of 20 AAs embedded in length-(aa_embed_dim) dense vectors
-        edge_dec_hid_dims = (edge_hid_dims[0]+aa_embed_dim, edge_hid_dims[1]) # Extends scalar portion by aa_embed_dim
+        self.aa_embed = nn.Embedding(20, embedding_dim=aa_embed_dim)  # Each of 20 AAs embedded in length-(aa_embed_dim) dense vectors
+        edge_dec_hid_dims = (edge_hid_dims[0]+aa_embed_dim, edge_hid_dims[1])  # Extends scalar portion by aa_embed_dim
 
         # Decoder
         self.decoder_layers = nn.ModuleList(
@@ -201,7 +201,7 @@ class PSCPAllChisNetwork(nn.Module):
         if self.use_svp_for_dense_and_offset:
             self.W_out = nn.Sequential(
                 SVLayerNorm(node_hid_dims),
-                Perceptron_(node_hid_dims, node_hid_dims), # Keep vector information
+                Perceptron_(node_hid_dims, node_hid_dims),  # Keep vector information
             )
         else:
             # TODO: Change from 1 unused vector output to actually 0 vector outputs
@@ -237,7 +237,7 @@ class PSCPAllChisNetwork(nn.Module):
                 self.dense = nn.Sequential(
                     nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
                     nn.Dropout(p=drop_rate),
-                    nn.Linear(node_s_dim, 4 * self.num_chi_bins), # All in the same dimension, later gets reshaped
+                    nn.Linear(node_s_dim, 4 * self.num_chi_bins),  # All in the same dimension, later gets reshaped
                 )
 
             # Create the offset layer that outputs the offsets from the center of the bins
@@ -255,14 +255,14 @@ class PSCPAllChisNetwork(nn.Module):
             else:
                 # TODO: Refactor this branch to use the use_svp_for_dense_and_offset flag
                 # to determine whether or not to use SVPerceptron
-                self.offset_layer = nn.Linear(node_s_dim, 4) # Single offset per chi
+                self.offset_layer = nn.Linear(node_s_dim, 4)  # Single offset per chi
 
         else:
             self.node_out_s_dim = node_out_s_dim
             self.dense = nn.Sequential(
                 nn.Linear(node_s_dim, node_s_dim), nn.ReLU(),
                 nn.Dropout(p=drop_rate),
-                nn.Linear(node_s_dim, 4 * node_out_s_dim), # All in the same dimension, later gets reshaped
+                nn.Linear(node_s_dim, 4 * node_out_s_dim),  # All in the same dimension, later gets reshaped
             )
 
         # Layers used for recycling previous predictions
@@ -391,7 +391,6 @@ class PSCPAllChisNetwork(nn.Module):
 
         # Gets vector features for nodes and edges
         if not self.no_vec:
-            # node_v = batch.node_v
             node_v = self._get_node_vectors(batch, device=device)
             pos_CB = batch.imputed_pos_CB if batch.imputed_pos_CB is not None else self._impute_cb_batch(batch).to(device)
             atom_type_to_pos = {
@@ -420,7 +419,7 @@ class PSCPAllChisNetwork(nn.Module):
         edge_in = ScalarVector(s=edge_s, v=edge_v)
 
         # Get rotation matrices
-        R_node = construct_3d_basis(batch.pos_CA, batch.pos_C, batch.pos_N)    # (N, 3, 3)
+        R_node = construct_3d_basis(batch.pos_CA, batch.pos_C, batch.pos_N)  # (N, 3, 3)
         R_node = R_node.nan_to_num()
         R_edge = R_node[edge_index[0]]  # (E, 3, 3)
         return edge_index, node_in, edge_in, R_node, R_edge
@@ -478,8 +477,8 @@ class PSCPAllChisNetwork(nn.Module):
         encoder_embeddings = h_node
 
         edge_index_i, edge_index_j = edge_index
-        h_seq = self.aa_embed(batch.seq)    # (N, aa_embed_dim)
-        h_seq = h_seq[edge_index_j]        # Amino acid embedding of j-nodes.
+        h_seq = self.aa_embed(batch.seq)  # (N, aa_embed_dim)
+        h_seq = h_seq[edge_index_j]  # Amino acid embedding of j-nodes.
         if not self.aa_embeds_on_back_edges:
             h_seq[edge_index_j >= edge_index_i] = 0
         h_edge_autoregressive = ScalarVector(
@@ -509,14 +508,14 @@ class PSCPAllChisNetwork(nn.Module):
             # Gets bin probs
             if self.separate_dense_layers:
                 if self.use_svp_for_dense_and_offset:
-                    separate_chi_logits = [dense(out).s for dense in self.denses] # Each one is (N, 72)
+                    separate_chi_logits = [dense(out).s for dense in self.denses]  # Each one is (N, 72)
                 else:
-                    separate_chi_logits = [dense(out) for dense in self.denses] # Each one is (N, 72)
+                    separate_chi_logits = [dense(out) for dense in self.denses]  # Each one is (N, 72)
                 chi_bin_logits = torch.stack(separate_chi_logits, dim=1)
             else:
                 # TODO: Refactor this branch to use the use_svp_for_dense_and_offset flag
                 # to determine whether or not to use SVPerceptron
-                chi_bin_logits = self.dense(out).reshape(n, 4, self.num_chi_bins) # (N, 4, 72)
+                chi_bin_logits = self.dense(out).reshape(n, 4, self.num_chi_bins)  # (N, 4, 72)
             chi_bin_probs = F.softmax(chi_bin_logits, dim=-1)
             chi_bin_log_probs = F.log_softmax(chi_bin_logits, dim=-1)
 
@@ -538,7 +537,7 @@ class PSCPAllChisNetwork(nn.Module):
                 # TODO: Refactor this branch to use the use_svp_for_dense_and_offset flag
                 # to determine whether or not to use SVPerceptron
                 offset = (bin_width * (torch.sigmoid(self.offset_layer(out)) - 0.5)) \
-                    .reshape(n, 4, 1) # (N, 4, 1)
+                    .reshape(n, 4, 1)  # (N, 4, 1)
 
             output['chi_bin_logits'] = chi_bin_logits
             output['chi_bin_probs'] = chi_bin_probs
@@ -552,7 +551,7 @@ class PSCPAllChisNetwork(nn.Module):
             output['chis'] = chis
             output['gumbel_sampled_chis'] = gumbel_sampled_chis
         else:
-            trig_dihedrals = self.dense(out).reshape(n, 4, self.node_out_s_dim)   # (N, 4, 2)
+            trig_dihedrals = self.dense(out).reshape(n, 4, self.node_out_s_dim)  # (N, 4, 2)
             output['trig_dihedrals'] = trig_dihedrals
 
         return output
@@ -734,7 +733,7 @@ class PSCPAllChisNetwork(nn.Module):
             # Chi angle-based
             "rotamer_recovery": lambda: rotamer_recovery_from_coords(
                 batch.seq, batch.chis, mode_chis, 
-                batch.residue_mask, chi_mask, # chi_num=None,
+                batch.residue_mask, chi_mask,  # chi_num=None,
                 _metric=_logger.get_metric(_log_prefix + " rotamer recovery")
             ),
 

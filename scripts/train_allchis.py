@@ -35,8 +35,8 @@ from models.loss_fns import trig_loss, huber_loss
 def setup_ddp(args):
     if args.ddp:
         dist.init_process_group(backend="nccl")
-        local_rank = int(os.environ["LOCAL_RANK"]) # Env var is set by torchrun
-        # local_rank = int(args.local_rank) # For use with torch.distributed.launch
+        local_rank = int(os.environ["LOCAL_RANK"])  # Env var is set by torch.distributed.run / torchrun
+        # local_rank = int(args.local_rank)  # For use with torch.distributed.launch
         torch.cuda.set_device(local_rank)
         args.rank = dist.get_rank()
         args.world_size = dist.get_world_size()
@@ -140,7 +140,7 @@ def train(
         optimizer.zero_grad()
 
         try:
-            output = model(batch)   # (N, 2)
+            output = model(batch)
             if not args.ddp:
                 loss, loss_breakdown = model.compute_loss(
                     output, batch, loss_weights=loss_weights, _return_breakdown=True
@@ -334,13 +334,13 @@ def get_loss_weights(epoch=1):
         # Chi angle-based loss terms
         "chi_nll_loss_weight": 1.0,
         "offset_mse_loss_weight": 100.0,
-        "rotamer_recovery_weight": 0.0, # Recovery rate is not differentiable 💀
+        "rotamer_recovery_weight": 0.0,  # Recovery rate is not differentiable 💀
         
         # Coordinate-based loss terms
         # "rmsd_loss_weight": linear_anneal_clamped(epoch=epoch),
         "rmsd_loss_weight": 0.01,
-        "clash_loss_weight": 0.0, # 1000.0,
-        "proline_loss_weight": 0.0, # 1.0,
+        "clash_loss_weight": 0.0,  # 1000.0,
+        "proline_loss_weight": 0.0,  # 1.0,
 
         # If not doing bin prediction
         "chi_trig_huber_loss_weight": 1.0,

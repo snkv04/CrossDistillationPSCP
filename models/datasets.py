@@ -73,7 +73,7 @@ def _process_single_entry(
                 and "_af" in data_dir
             )
         for residue in chain:
-            if residue.id[0] == ' ': # Skips water molecules and residues with hetero-atoms
+            if residue.id[0] == ' ':  # Skips water molecules and residues with hetero-atoms
                 # Gets the amino acid names from Biopython
                 try:
                     resnames.append(three_to_one(residue.get_resname()))
@@ -111,8 +111,8 @@ def _process_single_entry(
                         if key in residue:
                             bb_atom = residue[key]
                             residue_bb_plddt.append(bb_atom.get_bfactor())
-                        else:
-                            residue_bb_plddt.append(0.0) # Will be masked out anyway later
+                        else:  # This is just to be safe, but AF-generated structures always contain all backbone atoms
+                            residue_bb_plddt.append(0.0)  # Will be masked out anyway later
                 bb_plddt.append(residue_bb_plddt)
 
                 # Optionally checks for non-contiguous residues
